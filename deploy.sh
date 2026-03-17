@@ -9,19 +9,20 @@ SSH_USER="ahernandez"
 SSH_HOST="192.168.0.6"
 SSH_PORT="22"
 REMOTE_PATH="/volume1/web/wordpress/wp-content/themes/el-rancho-theme"
-LOCAL_PATH="$(cd "$(dirname "$0")" && pwd)/"
+LOCAL_PATH="$(cd "$(dirname "$0")" && pwd)"
 
 echo "🚀 Desplegando el-rancho-theme → $SSH_HOST..."
 
-rsync -avz --delete \
-  --exclude='.git' \
-  --exclude='.github' \
-  --exclude='deploy.sh' \
-  --exclude='*.md' \
-  --exclude='node_modules' \
-  --exclude='.DS_Store' \
-  -e "ssh -p $SSH_PORT" \
-  "$LOCAL_PATH" \
-  "$SSH_USER@$SSH_HOST:$REMOTE_PATH"
+tar czf - \
+  --exclude='./.git' \
+  --exclude='./.github' \
+  --exclude='./deploy.sh' \
+  --exclude='./*.md' \
+  --exclude='./node_modules' \
+  --exclude='./.DS_Store' \
+  --exclude='./._*' \
+  -C "$LOCAL_PATH" . \
+| ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no "$SSH_USER@$SSH_HOST" \
+  "tar xzf - -C '$REMOTE_PATH' && find '$REMOTE_PATH' -name '._*' -delete && rm -rf '$REMOTE_PATH/.git'"
 
 echo "✅ Deploy completado."
