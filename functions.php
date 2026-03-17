@@ -1854,6 +1854,11 @@ function erbl_register_account_endpoint() {
 }
 add_action( 'init', 'erbl_register_account_endpoint' );
 
+add_filter( 'woocommerce_get_query_vars', function( $vars ) {
+    $vars['my-points'] = '';
+    return $vars;
+} );
+
 // Flush automático una sola vez cuando el endpoint cambia de slug
 add_action( 'init', function() {
     if ( get_option('erbl_endpoint_slug') !== 'my-points' ) {
