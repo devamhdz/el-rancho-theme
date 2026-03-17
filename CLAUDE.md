@@ -47,6 +47,12 @@
 - [x] **#16** `REST-API.md` con documentación completa de todos los endpoints y ejemplos curl
 - [x] **#17** Endpoint `PUT /wp-json/erbl/v1/profile` para actualizar cumpleaños desde la app
 - [x] **#12b** `page-programa-de-lealtad.php` — template completo: hero, cómo funciona, tiers, calculadora, referidos, FAQ, CTA
+- [x] **Staff Redención** `page-rancho-staff.php` — flujo cajero: PIN → QR scanner → confirmación → resultado (monto a descontar en POS)
+- [x] **Staff Redención** REST `/redeem-token/preview` — valida token sin consumirlo, devuelve cliente + puntos + valor USD
+- [x] **Staff Redención** REST `/staff/create-user` — crea usuarios con rol `erbl_staff` desde app móvil
+- [x] **Staff Redención** Rol `erbl_staff` con capacidad `erbl_staff_consume` creado en `erbl_install()`
+- [x] **Staff Redención** `$staff_auth` — autorización unificada: `manage_woocommerce` OR `erbl_staff` role OR `staff_pin` param
+- [x] **Staff Redención** Settings: `staff_pin` y `redeem_min_store` en panel admin → Staff & Tienda
 
 ---
 
