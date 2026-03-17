@@ -1854,6 +1854,14 @@ function erbl_register_account_endpoint() {
 }
 add_action( 'init', 'erbl_register_account_endpoint' );
 
+// Flush automático una sola vez cuando el endpoint cambia de slug
+add_action( 'init', function() {
+    if ( get_option('erbl_endpoint_slug') !== 'my-points' ) {
+        flush_rewrite_rules();
+        update_option( 'erbl_endpoint_slug', 'my-points' );
+    }
+} );
+
 add_filter( 'woocommerce_account_menu_items', function( $items ) {
     $settings = elrancho_loyalty_get_settings();
     if ( $settings['enabled'] !== 'yes' ) { return $items; }
