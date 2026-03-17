@@ -9,9 +9,13 @@ defined('ABSPATH') || exit;
 
 $current_user = wp_get_current_user();
 $display_name = $current_user->display_name ? $current_user->display_name : $current_user->user_login;
-$loyalty_points = function_exists('elrancho_loyalty_get_user_points') && is_user_logged_in()
-	? (int) elrancho_loyalty_get_user_points(get_current_user_id())
+$loyalty_points = function_exists('erbl_get_user_points') && is_user_logged_in()
+	? erbl_get_user_points(get_current_user_id())
 	: 0;
+$user_tier = function_exists('erbl_get_user_tier') && is_user_logged_in()
+	? erbl_get_user_tier(get_current_user_id())
+	: 'bronze';
+$tier_label = function_exists('erbl_tier_label') ? erbl_tier_label($user_tier) : '';
 ?>
 
 <?php do_action('woocommerce_before_account_navigation'); ?>
@@ -28,6 +32,9 @@ $loyalty_points = function_exists('elrancho_loyalty_get_user_points') && is_user
 					: esc_html__('Cliente', 'elrancho');
 				?>
 			</small>
+			<?php if ($tier_label) : ?>
+			<small style="display:block;margin-top:2px;opacity:0.8;"><?php echo esc_html($tier_label); ?></small>
+			<?php endif; ?>
 		</div>
 	</div>
 

@@ -946,8 +946,9 @@ function erbl_install() {
         note        VARCHAR(255)    NOT NULL DEFAULT '',
         created_at  DATETIME        NOT NULL,
         PRIMARY KEY (id),
-        KEY user_id (user_id),
-        KEY type    (type)
+        KEY user_id    (user_id),
+        KEY type       (type),
+        KEY created_at (created_at)
     ) $charset;" );
 
     dbDelta( "CREATE TABLE $t_ch (
@@ -988,6 +989,10 @@ function erbl_install() {
     }
 }
 add_action( 'after_switch_theme', 'erbl_install' );
+add_action( 'after_switch_theme', function() {
+    erbl_register_account_endpoint();
+    flush_rewrite_rules();
+} );
 add_action( 'init', function() {
     if ( get_option('erbl_db_version') !== '2.0' ) {
         erbl_install();
@@ -1088,239 +1093,6 @@ function elrancho_loyalty_register_settings() {
     ] );
 }
 add_action( 'admin_init', 'elrancho_loyalty_register_settings' );
-
-/* --------------------------------------------------
-   4. ADMIN MENU & DASHBOARD
-   -------------------------------------------------- */
-function elrancho_loyalty_admin_menu() {
-    if ( ! current_user_can( 'manage_woocommerce' ) ) { return; }
-    add_submenu_page(
-        'woocommerce',
-        'Rancho Rewards',
-        'Rancho Rewards',
-        'manage_woocommerce',
-        'elrancho-loyalty',
-        'elrancho_loyalty_admin_page'
-    );
-}
-add_action( 'admin_menu', 'elrancho_loyalty_admin_menu' );
-
-function elrancho_loyalty_admin_page() {
-    if ( ! current_user_can( 'manage_woocommerce' ) ) { wp_die( 'Sin permisos.' ); }
-    global $wpdb;
-    $settings  = elrancho_loyalty_get_settings();
-    $tab       = sanitize_key( $_GET['tab'] ?? 'dashboard' );
-    $t_tx      = $wpdb->prefix . 'erbl_transactions';
-    $t_ch      = $wpdb->prefix . 'erbl_challenges';
-
-    $total_pts_active = (int) $wpdb->get_var( "SELECT COALESCE(SUM(CAST(meta_value AS UNSIGNED)),0) FROM {$wpdb->usermeta} WHERE meta_key='_erbl_points'" );
-    $members          = (int) $wpdb->get_var( "SELECT COUNT(DISTINCT user_id) FROM $t_tx" );
-    $pts_this_month   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COALESCE(SUM(delta),0) FROM $t_tx WHERE delta>0 AND created_at >= %s", date('Y-m-01') ) );
-    $redeemed_month   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT COALESCE(SUM(ABS(delta)),0) FROM $t_tx WHERE type='redemption' AND created_at >= %s", date('Y-m-01') ) );
-    ?>
-    <div class="wrap">
-    <h1 style="display:flex;align-items:center;gap:8px;"><span style="font-size:22px;">🥐</span> Rancho Rewards</h1>
-    <nav class="nav-tab-wrapper" style="margin-bottom:20px;">
-        <?php foreach ( [ 'dashboard' => 'Dashboard', 'settings' => 'Configuración', 'tiers' => 'Tiers', 'challenges' => 'Retos', 'members' => 'Miembros' ] as $t => $label ) : ?>
-            <a href="<?php echo esc_url( admin_url( 'admin.php?page=elrancho-loyalty&tab=' . $t ) ); ?>"
-               class="nav-tab <?php echo $tab === $t ? 'nav-tab-active' : ''; ?>"><?php echo esc_html( $label ); ?></a>
-        <?php endforeach; ?>
-    </nav>
-
-    <?php if ( $tab === 'dashboard' ) :
-        $cards = [
-            [ 'Miembros activos',         $members,                            '' ],
-            [ 'Puntos activos',            number_format($total_pts_active),   'pts' ],
-            [ 'Puntos ganados este mes',   number_format($pts_this_month),     'pts' ],
-            [ 'Puntos redimidos este mes', number_format($redeemed_month),     'pts' ],
-        ]; ?>
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;">
-            <?php foreach ( $cards as $c ) : ?>
-                <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px 20px;">
-                    <div style="font-size:12px;color:#666;margin-bottom:4px;"><?php echo esc_html($c[0]); ?></div>
-                    <div style="font-size:24px;font-weight:600;"><?php echo esc_html($c[1]); ?> <small style="font-size:13px;color:#888;"><?php echo esc_html($c[2]); ?></small></div>
-                </div>
-            <?php endforeach; ?>
-        </div>
-        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
-            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
-                <h3 style="margin-top:0;">Top 10 clientes por puntos</h3>
-                <?php
-                $top = $wpdb->get_results( "SELECT u.ID, u.display_name, CAST(um.meta_value AS UNSIGNED) AS pts FROM {$wpdb->users} u INNER JOIN {$wpdb->usermeta} um ON um.user_id = u.ID AND um.meta_key = '_erbl_points' WHERE CAST(um.meta_value AS UNSIGNED) > 0 ORDER BY pts DESC LIMIT 10" );
-                if ( $top ) : ?>
-                <table class="widefat" style="border:none;"><thead><tr><th>Cliente</th><th>Tier</th><th>Puntos</th></tr></thead><tbody>
-                <?php foreach ( $top as $r ) :
-                    $label = [ 'bronze' => '🥉 Bronce', 'silver' => '🥈 Plata', 'gold' => '🥇 Oro' ][ erbl_get_user_tier( $r->ID ) ] ?? 'Bronce'; ?>
-                    <tr><td><a href="<?php echo esc_url( get_edit_user_link( $r->ID ) ); ?>"><?php echo esc_html( $r->display_name ); ?></a></td><td><?php echo esc_html( $label ); ?></td><td><?php echo number_format( $r->pts ); ?></td></tr>
-                <?php endforeach; ?>
-                </tbody></table>
-                <?php else : ?><p>Aún no hay miembros con puntos.</p><?php endif; ?>
-            </div>
-            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
-                <h3 style="margin-top:0;">Últimas transacciones</h3>
-                <?php $recent = $wpdb->get_results( "SELECT t.*, u.display_name FROM $t_tx t LEFT JOIN {$wpdb->users} u ON u.ID = t.user_id ORDER BY t.id DESC LIMIT 15" );
-                if ( $recent ) : ?>
-                <table class="widefat" style="border:none;"><thead><tr><th>Cliente</th><th>Tipo</th><th>Delta</th><th>Fecha</th></tr></thead><tbody>
-                <?php foreach ( $recent as $r ) :
-                    $color = intval($r->delta) > 0 ? 'color:#0a7c42' : 'color:#c0392b';
-                    $sign  = intval($r->delta) > 0 ? '+' : ''; ?>
-                    <tr><td><?php echo esc_html( $r->display_name ); ?></td><td><?php echo esc_html( $r->type ); ?></td><td style="<?php echo esc_attr($color); ?>;font-weight:600;"><?php echo esc_html( $sign . number_format($r->delta) ); ?></td><td><?php echo esc_html( date_i18n( 'd M y', strtotime($r->created_at) ) ); ?></td></tr>
-                <?php endforeach; ?>
-                </tbody></table>
-                <?php else : ?><p>No hay transacciones aún.</p><?php endif; ?>
-            </div>
-        </div>
-
-    <?php elseif ( $tab === 'settings' ) : ?>
-        <form method="post" action="options.php">
-            <?php settings_fields( 'elrancho_loyalty_group' ); ?>
-            <h2>Acumulación de puntos</h2>
-            <table class="form-table">
-                <tr><th>Habilitar programa</th><td><label><input type="checkbox" name="elrancho_loyalty_settings[enabled]" value="1" <?php checked($settings['enabled'],'yes'); ?>> Activo</label></td></tr>
-                <tr><th>Puntos por $1 USD</th><td><input type="number" min="0" step="1" class="small-text" name="elrancho_loyalty_settings[points_rate]" value="<?php echo esc_attr($settings['points_rate']); ?>"><p class="description">10 = 10 pts por cada $1 gastado.</p></td></tr>
-                <tr><th>Valor del punto (USD)</th><td><input type="number" min="0" step="0.001" class="small-text" name="elrancho_loyalty_settings[point_value]" value="<?php echo esc_attr($settings['point_value']); ?>"><p class="description">0.01 = 100 pts equivalen a $1 USD.</p></td></tr>
-                <tr><th>Base de cálculo</th><td><select name="elrancho_loyalty_settings[points_base]"><option value="items" <?php selected($settings['points_base'],'items'); ?>>Total sin envío</option><option value="total" <?php selected($settings['points_base'],'total'); ?>>Total del pedido</option></select></td></tr>
-                <tr><th>Acreditar cuando</th><td><select name="elrancho_loyalty_settings[award_status]"><option value="processing" <?php selected($settings['award_status'],'processing'); ?>>Procesando</option><option value="completed" <?php selected($settings['award_status'],'completed'); ?>>Completado</option></select></td></tr>
-                <tr><th>Monto mínimo de orden (USD)</th><td><input type="number" min="0" step="0.01" class="small-text" name="elrancho_loyalty_settings[min_order_total]" value="<?php echo esc_attr($settings['min_order_total']); ?>"></td></tr>
-                <tr><th>Máx. pts por orden</th><td><input type="number" min="0" step="1" class="small-text" name="elrancho_loyalty_settings[max_points_per_order]" value="<?php echo esc_attr($settings['max_points_per_order']); ?>"><p class="description">0 = sin límite.</p></td></tr>
-            </table>
-            <h2>Redención</h2>
-            <table class="form-table">
-                <tr><th>Habilitar redención</th><td><label><input type="checkbox" name="elrancho_loyalty_settings[redeem_enabled]" value="1" <?php checked($settings['redeem_enabled'],'yes'); ?>> Permitir usar puntos en checkout</label></td></tr>
-                <tr><th>Mínimo para redimir (pts)</th><td><input type="number" min="0" step="1" class="small-text" name="elrancho_loyalty_settings[redeem_minimum]" value="<?php echo esc_attr($settings['redeem_minimum']); ?>"></td></tr>
-                <tr><th>Incremento de redención (pts)</th><td><input type="number" min="1" step="1" class="small-text" name="elrancho_loyalty_settings[redeem_step]" value="<?php echo esc_attr($settings['redeem_step']); ?>"></td></tr>
-                <tr><th>Descuento máximo (% del total)</th><td><input type="number" min="0" max="100" step="1" class="small-text" name="elrancho_loyalty_settings[redeem_max_pct]" value="<?php echo esc_attr($settings['redeem_max_pct']); ?>"> %</td></tr>
-            </table>
-            <h2>Bonos de eventos</h2>
-            <table class="form-table">
-                <tr><th>Bono de registro (pts)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_registration]" value="<?php echo esc_attr($settings['bonus_registration']); ?>"></td></tr>
-                <tr><th>Multiplicador de cumpleaños</th><td><input type="number" min="1" step="0.1" class="small-text" name="elrancho_loyalty_settings[bonus_birthday_mult]" value="<?php echo esc_attr($settings['bonus_birthday_mult']); ?>">x <p class="description">Se aplica toda la semana del cumpleaños.</p></td></tr>
-                <tr><th>Pts al referidor</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_referrer]" value="<?php echo esc_attr($settings['bonus_referrer']); ?>"></td></tr>
-                <tr><th>Pts al cliente referido</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_referred]" value="<?php echo esc_attr($settings['bonus_referred']); ?>"></td></tr>
-            </table>
-            <h2>Tiers</h2>
-            <table class="form-table">
-                <tr><th>Gasto mínimo para Plata (USD)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[tier_silver_spend]" value="<?php echo esc_attr($settings['tier_silver_spend']); ?>"></td></tr>
-                <tr><th>Multiplicador de puntos — Plata</th><td><input type="number" min="1" step="0.01" class="small-text" name="elrancho_loyalty_settings[tier_silver_mult]" value="<?php echo esc_attr($settings['tier_silver_mult']); ?>">x</td></tr>
-                <tr><th>Gasto mínimo para Oro (USD)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[tier_gold_spend]" value="<?php echo esc_attr($settings['tier_gold_spend']); ?>"></td></tr>
-                <tr><th>Multiplicador de puntos — Oro</th><td><input type="number" min="1" step="0.01" class="small-text" name="elrancho_loyalty_settings[tier_gold_mult]" value="<?php echo esc_attr($settings['tier_gold_mult']); ?>">x</td></tr>
-            </table>
-            <h2>Multiplicadores por categoría</h2>
-            <table class="form-table">
-                <tr><th>Slug de categoría especial</th><td><input type="text" class="regular-text" name="elrancho_loyalty_settings[cat_mult_cakes_slug]" value="<?php echo esc_attr($settings['cat_mult_cakes_slug']); ?>"><p class="description">Slug de WooCommerce, ej: custom-cakes</p></td></tr>
-                <tr><th>Multiplicador de esa categoría</th><td><input type="number" min="1" step="0.1" class="small-text" name="elrancho_loyalty_settings[cat_mult_cakes]" value="<?php echo esc_attr($settings['cat_mult_cakes']); ?>">x</td></tr>
-            </table>
-            <h2>Caducidad</h2>
-            <table class="form-table">
-                <tr><th>Meses sin actividad para expirar</th><td><input type="number" min="0" step="1" class="small-text" name="elrancho_loyalty_settings[expiry_months]" value="<?php echo esc_attr($settings['expiry_months']); ?>"><p class="description">0 = los puntos nunca caducan.</p></td></tr>
-            </table>
-            <?php submit_button( 'Guardar configuración' ); ?>
-        </form>
-
-    <?php elseif ( $tab === 'tiers' ) : ?>
-        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:24px;max-width:700px;">
-            <h2 style="margin-top:0;">Estructura de tiers</h2>
-            <?php foreach ( [
-                [ '🥉', 'Bronce', 'Desde el registro',                                                    '1x',                                  'Bono de bienvenida + cumpleaños' ],
-                [ '🥈', 'Plata',  '$' . number_format($settings['tier_silver_spend']) . ' USD acumulados', $settings['tier_silver_mult'] . 'x', 'Envío gratis + acceso anticipado' ],
-                [ '🥇', 'Oro',    '$' . number_format($settings['tier_gold_spend'])   . ' USD acumulados', $settings['tier_gold_mult']   . 'x', 'Todo lo de Plata + retos exclusivos' ],
-            ] as $t ) : ?>
-                <div style="border:1px solid #e0e0e0;border-radius:8px;padding:16px;margin-bottom:12px;display:flex;gap:16px;">
-                    <div style="font-size:32px;"><?php echo $t[0]; ?></div>
-                    <div>
-                        <strong style="font-size:16px;"><?php echo esc_html($t[1]); ?></strong>
-                        <div style="color:#666;font-size:13px;"><?php echo esc_html($t[2]); ?></div>
-                        <div style="color:#666;font-size:13px;">Multiplicador: <strong><?php echo esc_html($t[3]); ?></strong></div>
-                        <div style="color:#666;font-size:13px;"><?php echo esc_html($t[4]); ?></div>
-                    </div>
-                </div>
-            <?php endforeach; ?>
-        </div>
-
-    <?php elseif ( $tab === 'challenges' ) :
-        $t_ch = $wpdb->prefix . 'erbl_challenges';
-        if ( isset( $_POST['erbl_save_challenge'] ) && wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'erbl_challenges' ) ) {
-            $wpdb->insert( $t_ch, [
-                'title' => sanitize_text_field( $_POST['ch_title'] ?? '' ),
-                'description' => sanitize_textarea_field( $_POST['ch_desc'] ?? '' ),
-                'type' => sanitize_key( $_POST['ch_type'] ?? 'orders_count' ),
-                'target' => max( 1, intval( $_POST['ch_target'] ?? 1 ) ),
-                'bonus_pts' => max( 0, intval( $_POST['ch_pts'] ?? 0 ) ),
-                'tier_req' => sanitize_key( $_POST['ch_tier'] ?? 'bronze' ),
-                'active' => 1,
-                'created_at' => current_time('mysql'),
-            ] );
-            echo '<div class="notice notice-success"><p>Reto creado.</p></div>';
-        }
-        if ( isset( $_GET['toggle_ch'] ) && wp_verify_nonce( $_GET['_wpnonce'] ?? '', 'erbl_toggle_ch' ) ) {
-            $ch_id = intval( $_GET['toggle_ch'] );
-            $cur   = (int) $wpdb->get_var( $wpdb->prepare( "SELECT active FROM $t_ch WHERE id=%d", $ch_id ) );
-            $wpdb->update( $t_ch, [ 'active' => $cur ? 0 : 1 ], [ 'id' => $ch_id ] );
-        }
-        $challenges = $wpdb->get_results( "SELECT * FROM $t_ch ORDER BY id DESC" ); ?>
-        <h2>Retos activos</h2>
-        <table class="widefat striped">
-            <thead><tr><th>Título</th><th>Tipo</th><th>Meta</th><th>Bonus</th><th>Tier req.</th><th>Estado</th><th>Acción</th></tr></thead>
-            <tbody>
-            <?php foreach ( $challenges as $ch ) :
-                $tog = wp_nonce_url( admin_url( 'admin.php?page=elrancho-loyalty&tab=challenges&toggle_ch=' . $ch->id ), 'erbl_toggle_ch' ); ?>
-                <tr>
-                    <td><strong><?php echo esc_html($ch->title); ?></strong><br><span style="color:#888;font-size:12px;"><?php echo esc_html($ch->description); ?></span></td>
-                    <td><?php echo esc_html($ch->type); ?></td><td><?php echo esc_html($ch->target); ?></td>
-                    <td><?php echo number_format($ch->bonus_pts); ?> pts</td>
-                    <td><?php echo esc_html(ucfirst($ch->tier_req)); ?></td>
-                    <td><?php echo $ch->active ? '<span style="color:#0a7c42;">Activo</span>' : '<span style="color:#c0392b;">Inactivo</span>'; ?></td>
-                    <td><a href="<?php echo esc_url($tog); ?>"><?php echo $ch->active ? 'Pausar' : 'Activar'; ?></a></td>
-                </tr>
-            <?php endforeach; ?>
-            </tbody>
-        </table>
-        <h2 style="margin-top:28px;">Crear nuevo reto</h2>
-        <form method="post"><?php wp_nonce_field('erbl_challenges'); ?>
-            <table class="form-table">
-                <tr><th>Título</th><td><input type="text" name="ch_title" class="regular-text" required></td></tr>
-                <tr><th>Descripción</th><td><input type="text" name="ch_desc" class="regular-text"></td></tr>
-                <tr><th>Tipo</th><td><select name="ch_type"><option value="orders_count">Número de órdenes</option><option value="streak_weeks">Racha semanal</option><option value="single_order_min">Orden mínima ($)</option><option value="categories_month">Categorías distintas en el mes</option><option value="mondays_month">Compras en lunes del mes</option></select></td></tr>
-                <tr><th>Meta (número)</th><td><input type="number" name="ch_target" class="small-text" min="1" value="1"></td></tr>
-                <tr><th>Bonus (pts)</th><td><input type="number" name="ch_pts" class="small-text" min="0" value="100"></td></tr>
-                <tr><th>Tier requerido</th><td><select name="ch_tier"><option value="bronze">Bronce</option><option value="silver">Plata</option><option value="gold">Oro</option></select></td></tr>
-            </table>
-            <input type="submit" name="erbl_save_challenge" class="button button-primary" value="Crear reto">
-        </form>
-
-    <?php elseif ( $tab === 'members' ) : ?>
-        <h2>Buscar miembro</h2>
-        <form method="get"><input type="hidden" name="page" value="elrancho-loyalty"><input type="hidden" name="tab" value="members">
-            <input type="text" name="erbl_search" value="<?php echo esc_attr( $_GET['erbl_search'] ?? '' ); ?>" placeholder="Nombre o email...">
-            <input type="submit" class="button" value="Buscar">
-        </form>
-        <?php $search = sanitize_text_field( $_GET['erbl_search'] ?? '' );
-        if ( $search ) :
-            $users = get_users( [ 'search' => '*' . $search . '*', 'search_columns' => ['user_login','user_email','display_name'], 'number' => 30 ] );
-            if ( $users ) : ?>
-            <table class="widefat striped" style="margin-top:16px;">
-                <thead><tr><th>Cliente</th><th>Email</th><th>Tier</th><th>Puntos</th><th>Gasto total</th><th>Acciones</th></tr></thead>
-                <tbody>
-                <?php foreach ( $users as $u ) :
-                    $pts   = erbl_get_user_points( $u->ID );
-                    $tier  = erbl_get_user_tier( $u->ID );
-                    $spend = (float) get_user_meta( $u->ID, '_erbl_total_spend', true );
-                    $label = [ 'bronze' => '🥉 Bronce', 'silver' => '🥈 Plata', 'gold' => '🥇 Oro' ][ $tier ] ?? 'Bronce'; ?>
-                    <tr>
-                        <td><?php echo esc_html($u->display_name); ?></td><td><?php echo esc_html($u->user_email); ?></td>
-                        <td><?php echo esc_html($label); ?></td><td><?php echo number_format($pts); ?></td>
-                        <td>$<?php echo number_format($spend, 2); ?></td>
-                        <td><a href="<?php echo esc_url(get_edit_user_link($u->ID)); ?>">Editar</a></td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
-            <?php else : ?><p>Sin resultados.</p><?php endif;
-        endif; ?>
-    <?php endif; ?>
-    </div>
-    <?php
-}
 
 /* --------------------------------------------------
    5. FUNCIONES CORE DE PUNTOS Y TIERS
@@ -1456,6 +1228,20 @@ function elrancho_loyalty_maybe_award_points( $order_id ) {
     $order->update_meta_data( '_erbl_pts_reversed', 0 );
     $order->save();
     $order->add_order_note( sprintf( 'Rancho Rewards: +%d pts acreditados.', $points ) );
+    $user       = get_userdata( $user_id );
+    $new_balance = erbl_get_user_points( $user_id );
+    $new_tier    = erbl_tier_label( erbl_get_user_tier( $user_id ) );
+    $pts_url     = wc_get_account_endpoint_url('my-points');
+    if ( $user && $user->user_email ) {
+        $subject = sprintf( '🎉 Ganaste %d puntos en %s', $points, get_bloginfo('name') );
+        $body    = '<html><body style="font-family:sans-serif;color:#4A3B32;">'
+            . '<h2 style="color:#b81417;">¡Ganaste ' . number_format($points) . ' puntos!</h2>'
+            . '<p>Tu saldo actual: <strong>' . number_format($new_balance) . ' puntos</strong></p>'
+            . '<p>Tu nivel: <strong>' . esc_html($new_tier) . '</strong></p>'
+            . '<p><a href="' . esc_url($pts_url) . '" style="background:#b81417;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Ver mis puntos</a></p>'
+            . '</body></html>';
+        wp_mail( $user->user_email, $subject, $body, ['Content-Type: text/html; charset=UTF-8'] );
+    }
 }
 add_action( 'woocommerce_order_status_processing', 'elrancho_loyalty_maybe_award_points' );
 add_action( 'woocommerce_order_status_completed',  'elrancho_loyalty_maybe_award_points' );
@@ -1505,6 +1291,21 @@ function erbl_maybe_award_referral_bonus( $user_id, $order_id, $settings ) {
     erbl_adjust_points( $referrer_id, intval( $settings['bonus_referrer'] ), 'referral_bonus', $user_id,     'Bono por referido exitoso' );
     erbl_adjust_points( $user_id,     intval( $settings['bonus_referred'] ), 'referral_bonus', $referrer_id, 'Bono por usar código de referido' );
     update_user_meta( $user_id, '_erbl_referral_bonus_given', 1 );
+    $referrer_data  = get_userdata($referrer_id);
+    $referred_data  = get_userdata($user_id);
+    $referred_name  = $referred_data ? $referred_data->display_name : 'Un amigo';
+    $ref_new_bal    = erbl_get_user_points($referrer_id);
+    $pts_url        = wc_get_account_endpoint_url('my-points');
+    if ($referrer_data && $referrer_data->user_email) {
+        $subject = sprintf('¡Tu amigo %s hizo su primera compra! +%d pts', $referred_name, intval($settings['bonus_referrer']));
+        $body    = '<html><body style="font-family:sans-serif;color:#4A3B32;">'
+            . '<h2 style="color:#b81417;">¡Referido exitoso! 🎉</h2>'
+            . '<p>' . esc_html($referred_name) . ' hizo su primera compra y tú ganaste <strong>' . number_format(intval($settings['bonus_referrer'])) . ' puntos</strong>.</p>'
+            . '<p>Tu saldo actual: <strong>' . number_format($ref_new_bal) . ' puntos</strong></p>'
+            . '<p><a href="' . esc_url($pts_url) . '" style="background:#b81417;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;">Ver mis puntos</a></p>'
+            . '</body></html>';
+        wp_mail($referrer_data->user_email, $subject, $body, ['Content-Type: text/html; charset=UTF-8']);
+    }
     update_user_meta( $user_id, '_erbl_referred_by', $referrer_id );
 }
 
@@ -1696,6 +1497,29 @@ add_action( 'erbl_expire_points_event', function() {
         $pts = erbl_get_user_points( intval($uid) );
         if ( $pts > 0 ) { erbl_adjust_points( intval($uid), -$pts, 'expiry', 0, 'Expiración por inactividad' ); }
     }
+    // Resetear progreso de retos periódicos
+    $t_ch = $wpdb->prefix . 'erbl_challenges';
+    $t_cp = $wpdb->prefix . 'erbl_challenge_progress';
+    // Reset mensual: categories_month y mondays_month
+    $monthly_ids = $wpdb->get_col("SELECT id FROM $t_ch WHERE type IN ('categories_month','mondays_month') AND active=1");
+    if ($monthly_ids) {
+        $placeholders = implode(',', array_fill(0, count($monthly_ids), '%d'));
+        $wpdb->query($wpdb->prepare("UPDATE $t_cp SET progress=0, completed=0, completed_at=NULL WHERE challenge_id IN ($placeholders)", ...$monthly_ids));
+    }
+    // Reset streak_weeks: si el usuario no compró en los últimos 7 días, resetear
+    $streak_ids = $wpdb->get_col("SELECT id FROM $t_ch WHERE type='streak_weeks' AND active=1");
+    if ($streak_ids) {
+        $week_ago   = date('Y-m-d H:i:s', strtotime('-7 days'));
+        $t_tx_local = $wpdb->prefix . 'erbl_transactions';
+        $active_users = $wpdb->get_col($wpdb->prepare("SELECT DISTINCT user_id FROM $t_tx_local WHERE type='order' AND created_at >= %s", $week_ago));
+        $ph = implode(',', array_fill(0, count($streak_ids), '%d'));
+        if ($active_users) {
+            $u_ph = implode(',', array_fill(0, count($active_users), '%d'));
+            $wpdb->query($wpdb->prepare("UPDATE $t_cp SET progress=0, completed=0, completed_at=NULL WHERE challenge_id IN ($ph) AND user_id NOT IN ($u_ph)", ...array_merge($streak_ids, $active_users)));
+        } else {
+            $wpdb->query($wpdb->prepare("UPDATE $t_cp SET progress=0, completed=0, completed_at=NULL WHERE challenge_id IN ($ph)", ...$streak_ids));
+        }
+    }
 } );
 
 /* --------------------------------------------------
@@ -1703,15 +1527,20 @@ add_action( 'erbl_expire_points_event', function() {
    -------------------------------------------------- */
 add_action( 'rest_api_init', function() {
     $ns = 'erbl/v1';
-    $auth = function() { return is_user_logged_in(); };
+    $auth = function() { return is_user_logged_in() || ( defined('REST_REQUEST') && REST_REQUEST && get_current_user_id() > 0 ); };
 
     register_rest_route( $ns, '/wallet',          [ 'methods' => 'GET',  'callback' => 'erbl_api_wallet',          'permission_callback' => $auth ] );
     register_rest_route( $ns, '/transactions',    [ 'methods' => 'GET',  'callback' => 'erbl_api_transactions',    'permission_callback' => $auth ] );
     register_rest_route( $ns, '/challenges',      [ 'methods' => 'GET',  'callback' => 'erbl_api_challenges',      'permission_callback' => $auth ] );
     register_rest_route( $ns, '/referral/apply',  [ 'methods' => 'POST', 'callback' => 'erbl_api_apply_referral',  'permission_callback' => $auth,
         'args' => [ 'code' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
-    register_rest_route( $ns, '/redeem-token',    [ 'methods' => 'POST', 'callback' => 'erbl_api_redeem_token',    'permission_callback' => $auth,
+    register_rest_route( $ns, '/redeem-token',         [ 'methods' => 'POST', 'callback' => 'erbl_api_redeem_token',         'permission_callback' => $auth,
         'args' => [ 'points' => [ 'required' => true, 'validate_callback' => 'is_numeric' ] ] ] );
+    register_rest_route( $ns, '/redeem-token/consume', [ 'methods' => 'POST', 'callback' => 'erbl_api_consume_redeem_token', 'permission_callback' => function() {
+        return current_user_can('manage_woocommerce') || ( defined('REST_REQUEST') && REST_REQUEST && current_user_can('manage_woocommerce') );
+    }, 'args' => [ 'token' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
+    register_rest_route( $ns, '/profile',              [ 'methods' => 'PUT',  'callback' => 'erbl_api_update_profile',       'permission_callback' => $auth,
+        'args' => [ 'birthday' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
 } );
 
 function erbl_api_wallet( $request ) {
@@ -1794,6 +1623,38 @@ function erbl_api_redeem_token( $request ) {
     $token = wp_generate_password(24, false);
     set_transient( 'erbl_redeem_' . $token, [ 'user_id'=>$uid,'points'=>$pts ], 30 * MINUTE_IN_SECONDS );
     return rest_ensure_response( [ 'token'=>$token,'points'=>$pts,'value_usd'=>round($pts*floatval($settings['point_value']),2),'expires_in'=>1800,'qr_data'=>json_encode(['token'=>$token,'pts'=>$pts]) ] );
+}
+
+function erbl_api_consume_redeem_token( $request ) {
+    $token = sanitize_text_field( $request->get_param('token') );
+    $data  = get_transient( 'erbl_redeem_' . $token );
+    if ( ! $data ) { return new WP_Error('invalid_token', 'Token inválido o expirado.', ['status' => 404]); }
+    $uid  = intval($data['user_id']);
+    $pts  = intval($data['points']);
+    $bal  = erbl_adjust_points( $uid, -$pts, 'redemption', 0, 'Redención en tienda física' );
+    delete_transient( 'erbl_redeem_' . $token );
+    $user = get_userdata($uid);
+    return rest_ensure_response([
+        'success'     => true,
+        'user'        => $user ? $user->display_name : '#' . $uid,
+        'points_used' => $pts,
+        'new_balance' => $bal,
+    ]);
+}
+
+function erbl_api_update_profile( $request ) {
+    $uid      = get_current_user_id();
+    $birthday = sanitize_text_field( $request->get_param('birthday') ?? '' );
+    $updated  = [];
+    if ( $birthday ) {
+        if ( ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $birthday) ) {
+            return new WP_Error('invalid_date', 'Formato de fecha inválido. Use YYYY-MM-DD.', ['status' => 400]);
+        }
+        update_user_meta( $uid, '_erbl_birthday', $birthday );
+        $updated['birthday'] = $birthday;
+    }
+    if ( empty($updated) ) { return new WP_Error('no_data', 'No se proporcionaron datos para actualizar.', ['status' => 400]); }
+    return rest_ensure_response(['success' => true, 'updated' => $updated]);
 }
 
 /* --------------------------------------------------
@@ -1984,6 +1845,596 @@ function elrancho_account_menu_items( $items ) {
 }
 add_filter( 'woocommerce_account_menu_items', 'elrancho_account_menu_items', 20 );
 
+
+/* --------------------------------------------------
+   17. MI CUENTA — Página dedicada "Mis Puntos"
+   -------------------------------------------------- */
+function erbl_register_account_endpoint() {
+    add_rewrite_endpoint( 'my-points', EP_ROOT | EP_PAGES );
+}
+add_action( 'init', 'erbl_register_account_endpoint' );
+
+add_filter( 'woocommerce_account_menu_items', function( $items ) {
+    $settings = elrancho_loyalty_get_settings();
+    if ( $settings['enabled'] !== 'yes' ) { return $items; }
+    $new = [];
+    foreach ( $items as $key => $label ) {
+        $new[ $key ] = $label;
+        if ( $key === 'orders' ) { $new['my-points'] = '🎁 Mis Puntos'; }
+    }
+    return $new;
+}, 30 );
+
+add_action( 'woocommerce_account_my-points_endpoint', 'erbl_account_mis_puntos_page' );
+function erbl_account_mis_puntos_page() {
+    if ( ! is_user_logged_in() ) { return; }
+    global $wpdb;
+    $uid      = get_current_user_id();
+    $settings = elrancho_loyalty_get_settings();
+    $pv       = floatval( $settings['point_value'] );
+    $points   = erbl_get_user_points( $uid );
+    $spend    = erbl_get_user_total_spend( $uid );
+    $tier     = erbl_get_user_tier( $uid );
+    $ref_code = get_user_meta( $uid, '_erbl_referral_code', true );
+    $ref_link = $ref_code ? add_query_arg( 'ref', $ref_code, home_url('/') ) : '';
+
+    if ( $tier === 'bronze' )      { $t_spend = floatval($settings['tier_silver_spend']); $t_next = 'Plata 🥈'; }
+    elseif ( $tier === 'silver' )  { $t_spend = floatval($settings['tier_gold_spend']);   $t_next = 'Oro 🥇'; }
+    else                           { $t_spend = 0; $t_next = ''; }
+    $t_pct    = $t_spend > 0 ? min(100, round(($spend / $t_spend) * 100)) : 100;
+    $t_remain = $t_spend > 0 ? max(0, $t_spend - $spend) : 0;
+
+    $page       = max(1, intval($_GET['paged'] ?? 1));
+    $per        = 15;
+    $f_type     = sanitize_key($_GET['tipo'] ?? '');
+    $t_tx       = $wpdb->prefix . 'erbl_transactions';
+    $params_base = [$uid];
+    if ($f_type) { $params_base[] = $f_type; }
+    $where_sql   = $f_type ? ' AND type=%s' : '';
+    $total       = (int)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM $t_tx WHERE user_id=%d" . $where_sql, ...$params_base));
+    $txs         = $wpdb->get_results($wpdb->prepare("SELECT * FROM $t_tx WHERE user_id=%d" . $where_sql . " ORDER BY id DESC LIMIT %d OFFSET %d", ...array_merge($params_base, [$per, ($page-1)*$per])));
+    $pages      = (int)ceil($total / $per);
+
+    $t_ch = $wpdb->prefix . 'erbl_challenges';
+    $t_cp = $wpdb->prefix . 'erbl_challenge_progress';
+    $tier_rank  = ['bronze'=>1,'silver'=>2,'gold'=>3];
+    $user_rank  = $tier_rank[$tier] ?? 1;
+    $challenges = $wpdb->get_results("SELECT ch.*, cp.progress, cp.completed FROM $t_ch ch LEFT JOIN $t_cp cp ON cp.challenge_id=ch.id AND cp.user_id={$uid} WHERE ch.active=1 ORDER BY ch.bonus_pts DESC");
+
+    $tx_labels  = ['order'=>'🛒 Compra','registration'=>'🎉 Bienvenida','referral_bonus'=>'👥 Referido','redemption'=>'🎁 Redención','reversal'=>'↩ Reversa','challenge'=>'🎯 Reto','expiry'=>'⏰ Expiración','manual'=>'✏️ Ajuste'];
+    $base_url   = wc_get_account_endpoint_url('my-points');
+    ?>
+    <div style="max-width:820px;">
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px;">
+            <div style="background:#fdf8f1;border:1px solid #e8d5b0;border-radius:10px;padding:16px;text-align:center;">
+                <div style="font-size:28px;font-weight:700;color:#b81417;"><?php echo number_format($points); ?></div>
+                <div style="font-size:12px;color:#7D6B60;margin-top:2px;">puntos disponibles</div>
+                <div style="font-size:11px;color:#4A3B32;font-weight:500;margin-top:4px;">≈ $<?php echo number_format($points * $pv, 2); ?> USD</div>
+            </div>
+            <div style="background:#fdf8f1;border:1px solid #e8d5b0;border-radius:10px;padding:16px;text-align:center;">
+                <div style="font-size:22px;font-weight:700;color:#b81417;"><?php echo erbl_tier_label($tier); ?></div>
+                <div style="font-size:12px;color:#7D6B60;margin-top:2px;">tu nivel actual</div>
+                <div style="font-size:11px;color:#4A3B32;font-weight:500;margin-top:4px;">$<?php echo number_format($spend, 2); ?> gastados</div>
+            </div>
+            <div style="background:#fdf8f1;border:1px solid #e8d5b0;border-radius:10px;padding:16px;text-align:center;">
+                <div style="font-size:28px;font-weight:700;color:#b81417;"><?php echo number_format($total); ?></div>
+                <div style="font-size:12px;color:#7D6B60;margin-top:2px;">movimientos totales</div>
+            </div>
+        </div>
+
+        <?php if ( $t_spend > 0 ) : ?>
+        <div style="background:#fff;border:1px solid #e0d8cf;border-radius:10px;padding:16px 20px;margin-bottom:24px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <span style="font-size:14px;font-weight:600;color:#4A3B32;">Progreso hacia <?php echo esc_html($t_next); ?></span>
+                <span style="font-size:12px;color:#7D6B60;">$<?php echo number_format($t_remain, 2); ?> USD más</span>
+            </div>
+            <div style="background:#f0e8de;border-radius:99px;height:10px;overflow:hidden;">
+                <div style="background:#b81417;height:10px;border-radius:99px;width:<?php echo esc_attr($t_pct); ?>%;"></div>
+            </div>
+            <div style="display:flex;justify-content:space-between;margin-top:6px;">
+                <span style="font-size:11px;color:#7D6B60;"><?php echo erbl_tier_label($tier); ?></span>
+                <span style="font-size:11px;color:#7D6B60;"><?php echo $t_pct; ?>% completado</span>
+                <span style="font-size:11px;color:#7D6B60;"><?php echo esc_html($t_next); ?></span>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <?php if ($challenges) : ?>
+        <div style="background:#fff;border:1px solid #e0d8cf;border-radius:10px;padding:16px 20px;margin-bottom:24px;">
+            <h3 style="font-size:15px;font-weight:600;margin:0 0 14px;color:#4A3B32;">🎯 Retos activos</h3>
+            <?php foreach ($challenges as $ch) :
+                $cp    = intval($ch->progress ?? 0);
+                $ct    = intval($ch->target);
+                $done  = !empty($ch->completed);
+                $cpct  = $ct > 0 ? min(100, round(($cp/$ct)*100)) : 0;
+                $lock  = $user_rank < ($tier_rank[$ch->tier_req] ?? 1);
+                $col   = $done ? '#0a7c42' : ($lock ? '#aaa' : '#4A3B32'); ?>
+                <div style="display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #f0e8de;gap:12px;">
+                    <div style="flex:1;">
+                        <div style="font-size:13px;font-weight:600;color:<?php echo esc_attr($col);?>;"><?php echo $done?'✅ ':($lock?'🔒 ':''); echo esc_html($ch->title); ?></div>
+                        <div style="font-size:12px;color:#7D6B60;margin:2px 0 6px;"><?php echo esc_html($ch->description); ?><?php if($lock) echo ' — requiere '.esc_html(erbl_tier_label($ch->tier_req)); ?></div>
+                        <?php if (!$done && !$lock) : ?>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <div style="background:#f0e8de;border-radius:99px;height:6px;width:160px;">
+                                <div style="background:#b81417;height:6px;border-radius:99px;width:<?php echo esc_attr($cpct); ?>%;"></div>
+                            </div>
+                            <span style="font-size:11px;color:#7D6B60;"><?php echo $cp; ?>/<?php echo $ct; ?></span>
+                        </div>
+                        <?php endif; ?>
+                    </div>
+                    <div style="text-align:right;flex-shrink:0;">
+                        <span style="font-size:13px;font-weight:700;color:<?php echo $done?'#0a7c42':'#b81417'; ?>;">+<?php echo number_format($ch->bonus_pts); ?> pts</span>
+                        <?php if($done): ?><div style="font-size:10px;color:#0a7c42;">¡Completado!</div><?php endif; ?>
+                    </div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+        <?php endif; ?>
+
+        <div style="background:#fff;border:1px solid #e0d8cf;border-radius:10px;padding:16px 20px;margin-bottom:24px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px;">
+                <h3 style="font-size:15px;font-weight:600;margin:0;color:#4A3B32;">📋 Historial de puntos</h3>
+                <div style="display:flex;gap:6px;flex-wrap:wrap;">
+                    <?php foreach ([''=>'Todos','order'=>'Compras','referral_bonus'=>'Referidos','redemption'=>'Redenciones','challenge'=>'Retos'] as $v=>$l) :
+                        $active = ($f_type === $v);
+                        $url    = $v ? add_query_arg('tipo', $v, $base_url) : $base_url; ?>
+                        <a href="<?php echo esc_url($url); ?>" style="font-size:11px;padding:4px 10px;border-radius:99px;text-decoration:none;border:1px solid <?php echo $active?'#b81417':'#e0d8cf'; ?>;background:<?php echo $active?'#b81417':'#fdf8f1'; ?>;color:<?php echo $active?'#fff':'#7D6B60'; ?>;"><?php echo esc_html($l); ?></a>
+                    <?php endforeach; ?>
+                </div>
+            </div>
+
+            <?php if ($txs) : ?>
+            <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                <thead><tr style="border-bottom:2px solid #f0e8de;">
+                    <th style="text-align:left;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Movimiento</th>
+                    <th style="text-align:left;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Detalle</th>
+                    <th style="text-align:right;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Puntos</th>
+                    <th style="text-align:right;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Balance</th>
+                    <th style="text-align:right;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Fecha</th>
+                </tr></thead>
+                <tbody>
+                <?php foreach ($txs as $tx) :
+                    $pos   = intval($tx->delta) > 0;
+                    $color = $pos ? '#0a7c42' : '#c0392b';
+                    $sign  = $pos ? '+' : ''; ?>
+                    <tr style="border-bottom:1px solid #f9f4ef;">
+                        <td style="padding:10px 6px;color:#4A3B32;font-weight:500;"><?php echo esc_html($tx_labels[$tx->type] ?? ucfirst($tx->type)); ?></td>
+                        <td style="padding:10px 6px;color:#7D6B60;font-size:12px;"><?php echo esc_html($tx->note ?: '—'); ?></td>
+                        <td style="padding:10px 6px;text-align:right;font-weight:700;color:<?php echo esc_attr($color); ?>;"><?php echo esc_html($sign.number_format($tx->delta)); ?></td>
+                        <td style="padding:10px 6px;text-align:right;color:#4A3B32;"><?php echo number_format($tx->balance); ?></td>
+                        <td style="padding:10px 6px;text-align:right;color:#7D6B60;font-size:12px;white-space:nowrap;"><?php echo esc_html(date_i18n('d M Y', strtotime($tx->created_at))); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+            <?php if ($pages > 1) : ?>
+            <div style="display:flex;justify-content:center;gap:6px;margin-top:16px;flex-wrap:wrap;">
+                <?php for ($i=1; $i<=$pages; $i++) :
+                    $url_p = add_query_arg(array_filter(['tipo'=>$f_type,'paged'=>$i>1?$i:false]), $base_url);
+                    $act   = ($i === $page); ?>
+                    <a href="<?php echo esc_url($url_p); ?>" style="font-size:12px;padding:5px 12px;border-radius:6px;text-decoration:none;border:1px solid <?php echo $act?'#b81417':'#e0d8cf'; ?>;background:<?php echo $act?'#b81417':'#fff'; ?>;color:<?php echo $act?'#fff':'#4A3B32'; ?>;"><?php echo $i; ?></a>
+                <?php endfor; ?>
+            </div>
+            <?php endif; ?>
+            <?php else : ?>
+            <div style="text-align:center;padding:32px;color:#7D6B60;">
+                <div style="font-size:32px;margin-bottom:8px;">🍞</div>
+                <p style="margin:0;font-size:14px;">Aún no tienes movimientos<?php echo $f_type?' de este tipo':''; ?>.</p>
+                <p style="margin:6px 0 0;font-size:12px;">¡Haz tu primera compra para empezar!</p>
+            </div>
+            <?php endif; ?>
+        </div>
+
+        <?php if ($ref_link) : ?>
+        <div style="background:#fdf8f1;border:1px solid #e8d5b0;border-radius:10px;padding:16px 20px;text-align:center;">
+            <p style="font-size:14px;font-weight:600;color:#4A3B32;margin:0 0 4px;">Invita a un amigo y gana <?php echo number_format(intval($settings['bonus_referrer'])); ?> pts 🎁</p>
+            <p style="font-size:12px;color:#7D6B60;margin:0 0 12px;">Tu amigo también recibe <?php echo number_format(intval($settings['bonus_referred'])); ?> pts en su primera compra.</p>
+            <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;max-width:480px;margin:0 auto;">
+                <input type="text" value="<?php echo esc_url($ref_link); ?>" readonly onclick="this.select()" style="flex:1;min-width:200px;border:1px solid #e0d8cf;border-radius:8px;padding:8px 12px;font-size:12px;background:#fff;color:#4A3B32;">
+                <button onclick="navigator.clipboard.writeText('<?php echo esc_js($ref_link); ?>').then(()=>{this.textContent='¡Copiado! ✓';setTimeout(()=>this.textContent='Copiar link',2000)})" style="background:#b81417;color:#fff;border:none;border-radius:8px;padding:8px 18px;font-size:13px;cursor:pointer;white-space:nowrap;font-weight:500;">Copiar link</button>
+            </div>
+        </div>
+        <?php endif; ?>
+    </div>
+    <?php
+}
+
+/* --------------------------------------------------
+   18. ADMIN — Tab "Transacciones" con filtros
+   -------------------------------------------------- */
+add_action( 'admin_menu', function() {
+    if ( ! current_user_can( 'manage_woocommerce' ) ) { return; }
+    add_submenu_page( 'woocommerce', 'Rancho Rewards', 'Rancho Rewards', 'manage_woocommerce', 'elrancho-loyalty', 'erbl_admin_page_full' );
+} );
+
+function erbl_admin_page_full() {
+    if ( ! current_user_can( 'manage_woocommerce' ) ) { wp_die('Sin permisos.'); }
+    global $wpdb;
+    $s    = elrancho_loyalty_get_settings();
+    $tab  = sanitize_key( $_GET['tab'] ?? 'dashboard' );
+    $t_tx = $wpdb->prefix . 'erbl_transactions';
+    $t_ch = $wpdb->prefix . 'erbl_challenges';
+    $total_pts   = (int)$wpdb->get_var("SELECT COALESCE(SUM(CAST(meta_value AS UNSIGNED)),0) FROM {$wpdb->usermeta} WHERE meta_key='_erbl_points'");
+    $members     = (int)$wpdb->get_var("SELECT COUNT(DISTINCT user_id) FROM $t_tx");
+    $pts_month   = (int)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(delta),0) FROM $t_tx WHERE delta>0 AND created_at>=%s", date('Y-m-01')));
+    $red_month   = (int)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(ABS(delta)),0) FROM $t_tx WHERE type='redemption' AND created_at>=%s", date('Y-m-01')));
+    $tabs_nav = ['dashboard'=>'Dashboard','transactions'=>'Transacciones','settings'=>'Configuración','tiers'=>'Tiers','challenges'=>'Retos','members'=>'Miembros'];
+    ?>
+    <div class="wrap">
+    <h1 style="display:flex;align-items:center;gap:8px;"><span style="font-size:22px;">🥐</span> Rancho Rewards</h1>
+    <nav class="nav-tab-wrapper" style="margin-bottom:20px;">
+        <?php foreach ($tabs_nav as $t=>$l) : ?>
+            <a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab='.$t)); ?>" class="nav-tab <?php echo $tab===$t?'nav-tab-active':''; ?>"><?php echo esc_html($l); ?></a>
+        <?php endforeach; ?>
+    </nav>
+
+    <?php if ($tab === 'dashboard') :
+        $cards=[['Miembros activos',$members,''],['Puntos activos',number_format($total_pts),'pts'],['Puntos ganados mes',number_format($pts_month),'pts'],['Redimidos mes',number_format($red_month),'pts']]; ?>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px;">
+            <?php foreach ($cards as $c) : ?>
+                <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px 20px;">
+                    <div style="font-size:12px;color:#666;margin-bottom:4px;"><?php echo esc_html($c[0]); ?></div>
+                    <div style="font-size:22px;font-weight:600;"><?php echo esc_html($c[1]); ?> <small style="font-size:12px;color:#888;"><?php echo esc_html($c[2]); ?></small></div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;">
+            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
+                <h3 style="margin-top:0;">Top 10 clientes <a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions')); ?>" style="font-size:12px;font-weight:400;margin-left:8px;">Ver todas →</a></h3>
+                <?php $top=$wpdb->get_results("SELECT u.ID,u.display_name,CAST(um.meta_value AS UNSIGNED) AS pts FROM {$wpdb->users} u INNER JOIN {$wpdb->usermeta} um ON um.user_id=u.ID AND um.meta_key='_erbl_points' WHERE CAST(um.meta_value AS UNSIGNED)>0 ORDER BY pts DESC LIMIT 10");
+                if ($top) : ?>
+                <table class="widefat" style="border:none;"><thead><tr><th>Cliente</th><th>Tier</th><th>Puntos</th></tr></thead><tbody>
+                <?php foreach ($top as $r):?>
+                    <tr><td><a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions&uid='.$r->ID));?>" style="font-size:12px;"><?php echo esc_html($r->display_name);?></a></td><td><?php echo erbl_tier_label(erbl_get_user_tier($r->ID));?></td><td><?php echo number_format($r->pts);?></td></tr>
+                <?php endforeach;?>
+                </tbody></table>
+                <?php else: ?><p>Sin miembros aún.</p><?php endif; ?>
+            </div>
+            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
+                <h3 style="margin-top:0;">Últimas transacciones <a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions')); ?>" style="font-size:12px;font-weight:400;margin-left:8px;">Ver todas →</a></h3>
+                <?php $recent=$wpdb->get_results("SELECT t.*,u.display_name FROM $t_tx t LEFT JOIN {$wpdb->users} u ON u.ID=t.user_id ORDER BY t.id DESC LIMIT 10");
+                if ($recent): ?>
+                <table class="widefat" style="border:none;"><thead><tr><th>Cliente</th><th>Tipo</th><th>Delta</th><th>Fecha</th></tr></thead><tbody>
+                <?php foreach ($recent as $r): $pos=intval($r->delta)>0; ?>
+                    <tr><td><a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions&uid='.$r->user_id));?>" style="font-size:12px;"><?php echo esc_html($r->display_name);?></a></td><td style="font-size:11px;color:#646970;"><?php echo esc_html($r->type);?></td><td style="font-weight:600;color:<?php echo $pos?'#0a7c42':'#c0392b';?>;"><?php echo ($pos?'+':'').number_format($r->delta);?></td><td style="font-size:11px;color:#646970;"><?php echo esc_html(date_i18n('d M y',strtotime($r->created_at)));?></td></tr>
+                <?php endforeach;?>
+                </tbody></table>
+                <?php else: ?><p>Sin transacciones aún.</p><?php endif; ?>
+            </div>
+        </div>
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;margin-top:20px;">
+            <h3 style="margin-top:0;">Migración de datos v1 → v2</h3>
+            <p style="color:#646970;font-size:13px;">Migra usuarios del sistema antiguo (<code>_elrancho_loyalty_points</code>) al sistema v2. También genera códigos de referido y calcula el gasto total para usuarios sin estos datos.</p>
+            <button id="erbl-migrate-btn" class="button button-primary">Ejecutar migración</button>
+            <span id="erbl-migrate-status" style="margin-left:12px;font-size:13px;"></span>
+        </div>
+        <script>
+        document.getElementById('erbl-migrate-btn').addEventListener('click', function() {
+            var btn = this;
+            var status = document.getElementById('erbl-migrate-status');
+            btn.disabled = true;
+            status.textContent = 'Ejecutando...';
+            fetch(ajaxurl, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: 'action=erbl_run_migration&_wpnonce=' + '<?php echo wp_create_nonce("erbl_migrate"); ?>'
+            }).then(r => r.json()).then(data => {
+                status.textContent = data.data || data.message || 'Completado';
+                btn.disabled = false;
+            }).catch(() => {
+                status.textContent = 'Error. Intenta de nuevo.';
+                btn.disabled = false;
+            });
+        });
+        </script>
+
+    <?php elseif ($tab === 'transactions'):
+        $csv_url = wp_nonce_url(add_query_arg(array_filter(['erbl_export_csv'=>1,'uid'=>$_GET['uid']??'','tipo'=>$_GET['tipo']??'','desde'=>$_GET['desde']??'','hasta'=>$_GET['hasta']??'']), admin_url('admin.php?page=elrancho-loyalty&tab=transactions')), 'erbl_export_csv');
+        ?>
+        <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+            <a href="<?php echo esc_url($csv_url); ?>" class="button">⬇ Exportar CSV</a>
+        </div>
+        <?php
+        $f_uid  = intval($_GET['uid'] ?? 0);
+        $f_type = sanitize_key($_GET['tipo'] ?? '');
+        $f_from = sanitize_text_field($_GET['desde'] ?? '');
+        $f_to   = sanitize_text_field($_GET['hasta'] ?? '');
+        $pg     = max(1, intval($_GET['paged'] ?? 1));
+        $per_pg = 30;
+
+        $where  = 'WHERE 1=1'; $params = [];
+        if ($f_uid)  { $where .= ' AND t.user_id=%d'; $params[] = $f_uid; }
+        if ($f_type) { $where .= ' AND t.type=%s';    $params[] = $f_type; }
+        if ($f_from) { $where .= ' AND t.created_at>=%s'; $params[] = $f_from.' 00:00:00'; }
+        if ($f_to)   { $where .= ' AND t.created_at<=%s'; $params[] = $f_to.' 23:59:59'; }
+
+        $csql  = "SELECT COUNT(*) FROM $t_tx t $where";
+        $lsql  = "SELECT t.*,u.display_name FROM $t_tx t LEFT JOIN {$wpdb->users} u ON u.ID=t.user_id $where ORDER BY t.id DESC LIMIT %d OFFSET %d";
+        $total_rows = $params ? (int)$wpdb->get_var($wpdb->prepare($csql,...$params)) : (int)$wpdb->get_var($csql);
+        $lparams    = array_merge($params,[$per_pg,($pg-1)*$per_pg]);
+        $rows       = $params ? $wpdb->get_results($wpdb->prepare($lsql,...$lparams)) : $wpdb->get_results($wpdb->prepare($lsql,$per_pg,($pg-1)*$per_pg));
+        $total_pages = (int)ceil($total_rows/$per_pg);
+
+        if ($f_uid && ($su = get_userdata($f_uid))) : ?>
+            <div style="background:#fff;border:1px solid #2271b1;border-radius:8px;padding:14px 18px;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;">
+                <div>
+                    <strong style="font-size:15px;"><?php echo esc_html($su->display_name); ?></strong>
+                    <span style="color:#646970;font-size:13px;margin-left:8px;"><?php echo esc_html($su->user_email); ?></span>
+                    <div style="margin-top:4px;font-size:13px;">
+                        <?php echo erbl_tier_label(erbl_get_user_tier($f_uid)); ?> &nbsp;·&nbsp;
+                        <strong><?php echo number_format(erbl_get_user_points($f_uid)); ?> pts</strong> disponibles &nbsp;·&nbsp;
+                        $<?php echo number_format(erbl_get_user_total_spend($f_uid), 2); ?> USD gastados
+                    </div>
+                </div>
+                <div style="display:flex;gap:8px;">
+                    <a href="<?php echo esc_url(get_edit_user_link($f_uid)); ?>" class="button">Editar usuario</a>
+                    <a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions')); ?>" class="button">Ver todos</a>
+                </div>
+            </div>
+        <?php endif; ?>
+
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:14px 16px;margin-bottom:16px;">
+            <form method="get" style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;">
+                <input type="hidden" name="page" value="elrancho-loyalty">
+                <input type="hidden" name="tab"  value="transactions">
+                <div><label style="display:block;font-size:12px;color:#646970;margin-bottom:3px;">ID de usuario</label>
+                    <input type="number" name="uid" value="<?php echo esc_attr($f_uid?:''); ?>" placeholder="ID" style="width:100px;padding:5px 8px;border:1px solid #8c8f94;border-radius:3px;font-size:13px;"></div>
+                <div><label style="display:block;font-size:12px;color:#646970;margin-bottom:3px;">Tipo</label>
+                    <select name="tipo" style="padding:5px 8px;border:1px solid #8c8f94;border-radius:3px;font-size:13px;">
+                        <option value="">Todos</option>
+                        <?php foreach (['order'=>'Compra','registration'=>'Registro','referral_bonus'=>'Referido','redemption'=>'Redención','reversal'=>'Reversa','challenge'=>'Reto','expiry'=>'Expiración','manual'=>'Ajuste'] as $v=>$l): ?>
+                            <option value="<?php echo $v;?>" <?php selected($f_type,$v);?>><?php echo $l;?></option>
+                        <?php endforeach;?>
+                    </select></div>
+                <div><label style="display:block;font-size:12px;color:#646970;margin-bottom:3px;">Desde</label>
+                    <input type="date" name="desde" value="<?php echo esc_attr($f_from);?>" style="padding:5px 8px;border:1px solid #8c8f94;border-radius:3px;font-size:13px;"></div>
+                <div><label style="display:block;font-size:12px;color:#646970;margin-bottom:3px;">Hasta</label>
+                    <input type="date" name="hasta" value="<?php echo esc_attr($f_to);?>" style="padding:5px 8px;border:1px solid #8c8f94;border-radius:3px;font-size:13px;"></div>
+                <button type="submit" class="button button-primary">Filtrar</button>
+                <?php if ($f_uid||$f_type||$f_from||$f_to): ?>
+                    <a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions')); ?>" class="button">Limpiar</a>
+                <?php endif;?>
+            </form>
+        </div>
+
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;overflow:hidden;">
+            <div style="padding:10px 16px;border-bottom:1px solid #f0f0f1;display:flex;justify-content:space-between;">
+                <span style="font-size:13px;color:#646970;"><?php echo number_format($total_rows); ?> transacciones</span>
+                <?php if ($total_pages>1): ?><span style="font-size:12px;color:#646970;">Página <?php echo $pg; ?> de <?php echo $total_pages;?></span><?php endif;?>
+            </div>
+            <?php if ($rows):
+                $tlabels=['order'=>'🛒 Compra','registration'=>'🎉 Bienvenida','referral_bonus'=>'👥 Referido','redemption'=>'🎁 Redención','reversal'=>'↩ Reversa','challenge'=>'🎯 Reto','expiry'=>'⏰ Expiración','manual'=>'✏️ Ajuste']; ?>
+            <table class="widefat" style="border:none;border-radius:0;">
+                <thead><tr><th style="width:36px;">#</th><th>Cliente</th><th>Tipo</th><th>Nota</th><th style="text-align:right;">Puntos</th><th style="text-align:right;">Balance</th><th style="text-align:right;">Fecha</th></tr></thead>
+                <tbody>
+                <?php foreach ($rows as $r): $pos=intval($r->delta)>0; ?>
+                    <tr>
+                        <td style="color:#aaa;font-size:11px;"><?php echo $r->id;?></td>
+                        <td><a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions&uid='.$r->user_id));?>" style="font-size:13px;"><?php echo esc_html($r->display_name?:'#'.$r->user_id);?></a></td>
+                        <td style="font-size:12px;"><?php echo esc_html($tlabels[$r->type]??ucfirst($r->type));?></td>
+                        <td style="font-size:12px;color:#646970;max-width:180px;"><?php echo esc_html($r->note?:'—');?></td>
+                        <td style="text-align:right;font-weight:700;font-size:14px;color:<?php echo $pos?'#0a7c42':'#c0392b';?>;"><?php echo ($pos?'+':'').number_format($r->delta);?></td>
+                        <td style="text-align:right;font-size:13px;"><?php echo number_format($r->balance);?></td>
+                        <td style="text-align:right;font-size:12px;color:#646970;white-space:nowrap;"><?php echo esc_html(date_i18n('d M Y H:i',strtotime($r->created_at)));?></td>
+                    </tr>
+                <?php endforeach;?>
+                </tbody>
+            </table>
+            <?php if ($total_pages>1):
+                $burl=admin_url('admin.php?page=elrancho-loyalty&tab=transactions'.($f_uid?"&uid=$f_uid":'').($f_type?"&tipo=$f_type":'').($f_from?"&desde=$f_from":'').($f_to?"&hasta=$f_to":'')); ?>
+                <div style="padding:10px 16px;border-top:1px solid #f0f0f1;display:flex;gap:4px;justify-content:flex-end;">
+                <?php for ($i=1;$i<=$total_pages;$i++): $act=($i===$pg); ?>
+                    <a href="<?php echo esc_url(add_query_arg('paged',$i,$burl));?>" style="padding:4px 10px;border:1px solid <?php echo $act?'#2271b1':'#ddd';?>;border-radius:3px;font-size:12px;text-decoration:none;background:<?php echo $act?'#2271b1':'#fff';?>;color:<?php echo $act?'#fff':'#2c3338';?>;"><?php echo $i;?></a>
+                <?php endfor;?>
+                </div>
+            <?php endif;?>
+            <?php else: ?>
+                <div style="padding:32px;text-align:center;color:#646970;"><p>No se encontraron transacciones con estos filtros.</p></div>
+            <?php endif;?>
+        </div>
+
+    <?php elseif ($tab === 'settings'): ?>
+        <form method="post" action="options.php">
+            <?php settings_fields('elrancho_loyalty_group');?>
+            <h2>Acumulación de puntos</h2>
+            <table class="form-table">
+                <tr><th>Habilitar programa</th><td><label><input type="checkbox" name="elrancho_loyalty_settings[enabled]" value="1" <?php checked($s['enabled'],'yes');?>> Activo</label></td></tr>
+                <tr><th>Puntos por $1 USD</th><td><input type="number" min="0" step="1" class="small-text" name="elrancho_loyalty_settings[points_rate]" value="<?php echo esc_attr($s['points_rate']);?>"><p class="description">10 pts por cada dólar.</p></td></tr>
+                <tr><th>Valor del punto (USD)</th><td><input type="number" min="0" step="0.001" class="small-text" name="elrancho_loyalty_settings[point_value]" value="<?php echo esc_attr($s['point_value']);?>"><p class="description">0.01 = 100 pts = $1 USD.</p></td></tr>
+                <tr><th>Base de cálculo</th><td><select name="elrancho_loyalty_settings[points_base]"><option value="items" <?php selected($s['points_base'],'items');?>>Sin envío</option><option value="total" <?php selected($s['points_base'],'total');?>>Total pedido</option></select></td></tr>
+                <tr><th>Acreditar cuando</th><td><select name="elrancho_loyalty_settings[award_status]"><option value="processing" <?php selected($s['award_status'],'processing');?>>Procesando</option><option value="completed" <?php selected($s['award_status'],'completed');?>>Completado</option></select></td></tr>
+                <tr><th>Monto mínimo (USD)</th><td><input type="number" min="0" step="0.01" class="small-text" name="elrancho_loyalty_settings[min_order_total]" value="<?php echo esc_attr($s['min_order_total']);?>"></td></tr>
+                <tr><th>Máx. pts por orden</th><td><input type="number" min="0" step="1" class="small-text" name="elrancho_loyalty_settings[max_points_per_order]" value="<?php echo esc_attr($s['max_points_per_order']);?>"><p class="description">0 = sin límite.</p></td></tr>
+            </table>
+            <h2>Redención</h2>
+            <table class="form-table">
+                <tr><th>Habilitar redención</th><td><label><input type="checkbox" name="elrancho_loyalty_settings[redeem_enabled]" value="1" <?php checked($s['redeem_enabled'],'yes');?>> Activo</label></td></tr>
+                <tr><th>Mínimo para redimir (pts)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[redeem_minimum]" value="<?php echo esc_attr($s['redeem_minimum']);?>"></td></tr>
+                <tr><th>Incremento (pts)</th><td><input type="number" min="1" class="small-text" name="elrancho_loyalty_settings[redeem_step]" value="<?php echo esc_attr($s['redeem_step']);?>"></td></tr>
+                <tr><th>Descuento máximo (%)</th><td><input type="number" min="0" max="100" class="small-text" name="elrancho_loyalty_settings[redeem_max_pct]" value="<?php echo esc_attr($s['redeem_max_pct']);?>"> %</td></tr>
+            </table>
+            <h2>Bonos</h2>
+            <table class="form-table">
+                <tr><th>Bono de registro (pts)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_registration]" value="<?php echo esc_attr($s['bonus_registration']);?>"></td></tr>
+                <tr><th>Multiplicador cumpleaños</th><td><input type="number" min="1" step="0.1" class="small-text" name="elrancho_loyalty_settings[bonus_birthday_mult]" value="<?php echo esc_attr($s['bonus_birthday_mult']);?>">x</td></tr>
+                <tr><th>Pts al referidor</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_referrer]" value="<?php echo esc_attr($s['bonus_referrer']);?>"></td></tr>
+                <tr><th>Pts al referido</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_referred]" value="<?php echo esc_attr($s['bonus_referred']);?>"></td></tr>
+            </table>
+            <h2>Tiers</h2>
+            <table class="form-table">
+                <tr><th>Gasto mínimo Plata (USD)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[tier_silver_spend]" value="<?php echo esc_attr($s['tier_silver_spend']);?>"></td></tr>
+                <tr><th>Multiplicador Plata</th><td><input type="number" min="1" step="0.01" class="small-text" name="elrancho_loyalty_settings[tier_silver_mult]" value="<?php echo esc_attr($s['tier_silver_mult']);?>">x</td></tr>
+                <tr><th>Gasto mínimo Oro (USD)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[tier_gold_spend]" value="<?php echo esc_attr($s['tier_gold_spend']);?>"></td></tr>
+                <tr><th>Multiplicador Oro</th><td><input type="number" min="1" step="0.01" class="small-text" name="elrancho_loyalty_settings[tier_gold_mult]" value="<?php echo esc_attr($s['tier_gold_mult']);?>">x</td></tr>
+            </table>
+            <h2>Categoría especial</h2>
+            <table class="form-table">
+                <tr><th>Slug de categoría</th><td><input type="text" class="regular-text" name="elrancho_loyalty_settings[cat_mult_cakes_slug]" value="<?php echo esc_attr($s['cat_mult_cakes_slug']);?>"></td></tr>
+                <tr><th>Multiplicador</th><td><input type="number" min="1" step="0.1" class="small-text" name="elrancho_loyalty_settings[cat_mult_cakes]" value="<?php echo esc_attr($s['cat_mult_cakes']);?>">x</td></tr>
+            </table>
+            <h2>Caducidad</h2>
+            <table class="form-table">
+                <tr><th>Meses sin actividad</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[expiry_months]" value="<?php echo esc_attr($s['expiry_months']);?>"><p class="description">0 = nunca caducan.</p></td></tr>
+            </table>
+            <?php submit_button('Guardar configuración');?>
+        </form>
+
+    <?php elseif ($tab === 'tiers'): ?>
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:24px;max-width:700px;">
+            <h2 style="margin-top:0;">Estructura de tiers</h2>
+            <?php foreach ([['🥉','Bronce','Desde el registro','1x','Bono bienvenida + cumpleaños'],['🥈','Plata','$'.number_format($s['tier_silver_spend']).' USD acumulados',$s['tier_silver_mult'].'x','Envío gratis + acceso anticipado'],['🥇','Oro','$'.number_format($s['tier_gold_spend']).' USD acumulados',$s['tier_gold_mult'].'x','Todo lo de Plata + retos exclusivos']] as $t): ?>
+                <div style="border:1px solid #e0e0e0;border-radius:8px;padding:16px;margin-bottom:12px;display:flex;gap:16px;">
+                    <div style="font-size:32px;"><?php echo $t[0];?></div>
+                    <div><strong style="font-size:16px;"><?php echo esc_html($t[1]);?></strong>
+                    <div style="color:#666;font-size:13px;"><?php echo esc_html($t[2]);?></div>
+                    <div style="color:#666;font-size:13px;">Multiplicador: <strong><?php echo esc_html($t[3]);?></strong></div>
+                    <div style="color:#666;font-size:13px;"><?php echo esc_html($t[4]);?></div></div>
+                </div>
+            <?php endforeach;?>
+        </div>
+
+    <?php elseif ($tab === 'challenges'):
+        $t_ch=$wpdb->prefix.'erbl_challenges';
+        if (isset($_POST['erbl_save_challenge'])&&wp_verify_nonce($_POST['_wpnonce']??'','erbl_challenges')):
+            $wpdb->insert($t_ch,['title'=>sanitize_text_field($_POST['ch_title']??''),'description'=>sanitize_textarea_field($_POST['ch_desc']??''),'type'=>sanitize_key($_POST['ch_type']??'orders_count'),'target'=>max(1,intval($_POST['ch_target']??1)),'bonus_pts'=>max(0,intval($_POST['ch_pts']??0)),'tier_req'=>sanitize_key($_POST['ch_tier']??'bronze'),'active'=>1,'created_at'=>current_time('mysql')]);
+            echo '<div class="notice notice-success"><p>Reto creado.</p></div>';
+        endif;
+        if (isset($_GET['toggle_ch'])&&wp_verify_nonce($_GET['_wpnonce']??'','erbl_toggle_ch')):
+            $cid=(int)$_GET['toggle_ch'];
+            $wpdb->update($t_ch,['active'=>(int)!$wpdb->get_var($wpdb->prepare("SELECT active FROM $t_ch WHERE id=%d",$cid))],['id'=>$cid]);
+        endif;
+        $challenges=$wpdb->get_results("SELECT * FROM $t_ch ORDER BY id DESC");?>
+        <table class="widefat striped"><thead><tr><th>Título</th><th>Tipo</th><th>Meta</th><th>Bonus</th><th>Tier</th><th>Estado</th><th>Acción</th></tr></thead><tbody>
+        <?php foreach($challenges as $ch):$tog=wp_nonce_url(admin_url('admin.php?page=elrancho-loyalty&tab=challenges&toggle_ch='.$ch->id),'erbl_toggle_ch');?>
+            <tr><td><strong><?php echo esc_html($ch->title);?></strong><br><span style="color:#888;font-size:12px;"><?php echo esc_html($ch->description);?></span></td><td><?php echo esc_html($ch->type);?></td><td><?php echo esc_html($ch->target);?></td><td><?php echo number_format($ch->bonus_pts);?> pts</td><td><?php echo esc_html(ucfirst($ch->tier_req));?></td><td><?php echo $ch->active?'<span style="color:#0a7c42;">Activo</span>':'<span style="color:#c0392b;">Inactivo</span>';?></td><td><a href="<?php echo esc_url($tog);?>"><?php echo $ch->active?'Pausar':'Activar';?></a></td></tr>
+        <?php endforeach;?>
+        </tbody></table>
+        <h2 style="margin-top:24px;">Crear reto</h2>
+        <form method="post"><?php wp_nonce_field('erbl_challenges');?>
+            <table class="form-table">
+                <tr><th>Título</th><td><input type="text" name="ch_title" class="regular-text" required></td></tr>
+                <tr><th>Descripción</th><td><input type="text" name="ch_desc" class="regular-text"></td></tr>
+                <tr><th>Tipo</th><td><select name="ch_type"><option value="orders_count">N° de órdenes</option><option value="streak_weeks">Racha semanal</option><option value="single_order_min">Orden mínima ($)</option><option value="categories_month">Categorías distintas</option><option value="mondays_month">Lunes del mes</option></select></td></tr>
+                <tr><th>Meta</th><td><input type="number" name="ch_target" class="small-text" min="1" value="1"></td></tr>
+                <tr><th>Bonus (pts)</th><td><input type="number" name="ch_pts" class="small-text" min="0" value="100"></td></tr>
+                <tr><th>Tier requerido</th><td><select name="ch_tier"><option value="bronze">Bronce</option><option value="silver">Plata</option><option value="gold">Oro</option></select></td></tr>
+            </table>
+            <input type="submit" name="erbl_save_challenge" class="button button-primary" value="Crear reto">
+        </form>
+
+    <?php elseif ($tab === 'members'): ?>
+        <h2>Buscar miembro</h2>
+        <form method="get"><input type="hidden" name="page" value="elrancho-loyalty"><input type="hidden" name="tab" value="members">
+            <input type="text" name="erbl_search" value="<?php echo esc_attr($_GET['erbl_search']??'');?>" placeholder="Nombre o email...">
+            <input type="submit" class="button" value="Buscar">
+        </form>
+        <?php $search=sanitize_text_field($_GET['erbl_search']??'');
+        if ($search):
+            $users=get_users(['search'=>'*'.$search.'*','search_columns'=>['user_login','user_email','display_name'],'number'=>30]);
+            if ($users): ?>
+            <table class="widefat striped" style="margin-top:16px;"><thead><tr><th>Cliente</th><th>Email</th><th>Tier</th><th>Puntos</th><th>Gasto</th><th>Acciones</th></tr></thead><tbody>
+            <?php foreach($users as $u): ?>
+                <tr><td><?php echo esc_html($u->display_name);?></td><td><?php echo esc_html($u->user_email);?></td><td><?php echo erbl_tier_label(erbl_get_user_tier($u->ID));?></td><td><?php echo number_format(erbl_get_user_points($u->ID));?></td><td>$<?php echo number_format((float)get_user_meta($u->ID,'_erbl_total_spend',true),2);?></td>
+                <td><a href="<?php echo esc_url(admin_url('admin.php?page=elrancho-loyalty&tab=transactions&uid='.$u->ID));?>">Ver transacciones</a> | <a href="<?php echo esc_url(get_edit_user_link($u->ID));?>">Editar</a></td></tr>
+            <?php endforeach;?>
+            </tbody></table>
+            <?php else: ?><p>Sin resultados.</p><?php endif;
+        endif;?>
+    <?php endif;?>
+    </div>
+    <?php
+}
+
+
+
+/* --------------------------------------------------
+   19. MIGRACIÓN v1 → v2
+   -------------------------------------------------- */
+add_action( 'wp_ajax_erbl_run_migration', function() {
+    if ( ! current_user_can('manage_woocommerce') || ! wp_verify_nonce( $_POST['_wpnonce'] ?? '', 'erbl_migrate' ) ) {
+        wp_send_json_error('Sin permisos.');
+    }
+    global $wpdb;
+    $settings   = elrancho_loyalty_get_settings();
+    $migrated   = 0;
+    $ref_gen    = 0;
+    $spend_calc = 0;
+    $users = get_users(['role' => 'customer', 'number' => -1, 'fields' => 'ID']);
+    foreach ($users as $uid) {
+        // Migrar puntos v1
+        $old = get_user_meta($uid, '_elrancho_loyalty_points', true);
+        if ($old !== '' && $old !== false) {
+            $current = erbl_get_user_points($uid);
+            if ($current === 0) {
+                update_user_meta($uid, '_erbl_points', max(0, intval($old)));
+            }
+            delete_user_meta($uid, '_elrancho_loyalty_points');
+            $migrated++;
+        }
+        // Generar código de referido si no tiene
+        $code = get_user_meta($uid, '_erbl_referral_code', true);
+        if (!$code) {
+            $new_code = strtoupper(substr(md5($uid . wp_generate_password(8, false)), 0, 8));
+            update_user_meta($uid, '_erbl_referral_code', $new_code);
+            $ref_gen++;
+        }
+        // Calcular total_spend si no tiene
+        $spend = get_user_meta($uid, '_erbl_total_spend', true);
+        if ($spend === '' || $spend === false) {
+            $orders = wc_get_orders(['customer' => $uid, 'status' => 'completed', 'limit' => -1]);
+            $total  = 0.0;
+            foreach ($orders as $order) {
+                $total += floatval($order->get_total()) - floatval($order->get_shipping_total());
+            }
+            update_user_meta($uid, '_erbl_total_spend', max(0.0, $total));
+            $spend_calc++;
+        }
+    }
+    // Actualizar índice de DB si no existe
+    $t_tx = $wpdb->prefix . 'erbl_transactions';
+    $indexes = $wpdb->get_results("SHOW INDEX FROM $t_tx WHERE Key_name='created_at'");
+    if (empty($indexes)) {
+        $wpdb->query("ALTER TABLE $t_tx ADD INDEX created_at (created_at)");
+    }
+    wp_send_json_success(sprintf(
+        'Migración completada: %d puntos migrados, %d códigos generados, %d gastos calculados.',
+        $migrated, $ref_gen, $spend_calc
+    ));
+} );
+
+/* --------------------------------------------------
+   20. EXPORTAR TRANSACCIONES CSV
+   -------------------------------------------------- */
+add_action( 'admin_init', function() {
+    if ( ! isset($_GET['erbl_export_csv']) || ! current_user_can('manage_woocommerce') ) { return; }
+    if ( ! wp_verify_nonce($_GET['_wpnonce'] ?? '', 'erbl_export_csv') ) { wp_die('Nonce inválido.'); }
+    global $wpdb;
+    $t_tx   = $wpdb->prefix . 'erbl_transactions';
+    $f_uid  = intval($_GET['uid'] ?? 0);
+    $f_type = sanitize_key($_GET['tipo'] ?? '');
+    $f_from = sanitize_text_field($_GET['desde'] ?? '');
+    $f_to   = sanitize_text_field($_GET['hasta'] ?? '');
+    $where  = ['1=1'];
+    $params = [];
+    if ($f_uid)  { $where[] = 'user_id=%d'; $params[] = $f_uid; }
+    if ($f_type) { $where[] = 'type=%s';    $params[] = $f_type; }
+    if ($f_from) { $where[] = 'created_at>=%s'; $params[] = $f_from . ' 00:00:00'; }
+    if ($f_to)   { $where[] = 'created_at<=%s'; $params[] = $f_to   . ' 23:59:59'; }
+    $sql  = "SELECT t.*,u.display_name,u.user_email FROM $t_tx t LEFT JOIN {$wpdb->users} u ON u.ID=t.user_id WHERE " . implode(' AND ', $where) . " ORDER BY t.id DESC";
+    $rows = $params ? $wpdb->get_results($wpdb->prepare($sql, ...$params)) : $wpdb->get_results($sql);
+    $labels = ['order'=>'Compra','registration'=>'Bienvenida','referral_bonus'=>'Referido','redemption'=>'Redención','reversal'=>'Reversa','challenge'=>'Reto','expiry'=>'Expiración','manual'=>'Ajuste'];
+    header('Content-Type: text/csv; charset=utf-8');
+    header('Content-Disposition: attachment; filename="rancho-rewards-' . date('Y-m-d') . '.csv"');
+    $out = fopen('php://output', 'w');
+    fprintf($out, chr(0xEF).chr(0xBB).chr(0xBF)); // UTF-8 BOM
+    fputcsv($out, ['ID', 'Cliente', 'Email', 'Tipo', 'Puntos', 'Balance', 'Nota', 'Fecha']);
+    foreach ($rows as $r) {
+        fputcsv($out, [$r->id, $r->display_name, $r->user_email, $labels[$r->type] ?? $r->type, $r->delta, $r->balance, $r->note, $r->created_at]);
+    }
+    fclose($out);
+    exit;
+} );
 
 /* =============================================
    OPCIONES DEL CUSTOMIZER

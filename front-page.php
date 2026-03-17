@@ -294,7 +294,7 @@ if (empty($hero_slides)) {
         <p class="loyalty-description"><?php echo esc_html($loyalty_desc); ?></p>
         <div class="loyalty-actions">
             <?php if (is_user_logged_in()) : ?>
-                <a href="<?php echo esc_url(add_query_arg('loyalty', '1', get_permalink(get_option('woocommerce_myaccount_page_id')))); ?>" class="btn btn-dark">
+                <a href="<?php echo esc_url(wc_get_account_endpoint_url('my-points')); ?>" class="btn btn-dark">
                     <?php esc_html_e('Ver mis puntos', 'elrancho'); ?>
                 </a>
             <?php else : ?>

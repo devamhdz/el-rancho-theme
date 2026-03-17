@@ -197,7 +197,7 @@ $points_left  = ( $target_spend > 0 ) ? max( 0, $target_spend - $erbl_spend ) : 
 					endif; ?>
 				</p>
 				<?php endif; ?>
-				<a class="redeem-link" href="<?php echo esc_url(wc_get_account_endpoint_url('orders')); ?>"><?php esc_html_e('Ver mis puntos', 'elrancho'); ?></a>
+				<a class="redeem-link" href="<?php echo esc_url(wc_get_account_endpoint_url('my-points')); ?>"><?php esc_html_e('Ver mis puntos', 'elrancho'); ?></a>
 			</article>
 
 			<article class="elr-support-panel">
