@@ -987,6 +987,14 @@ function erbl_install() {
         $wpdb->insert( $t_ch, [ 'title' => 'Ticket grande',    'description' => 'Haz una compra mayor a $35 USD',         'type' => 'single_order_min','target' => 35, 'bonus_pts' => 150, 'tier_req' => 'bronze', 'active' => 1, 'created_at' => $now ] );
         $wpdb->insert( $t_ch, [ 'title' => 'Reto Oro — lunes', 'description' => 'Compra todos los lunes del mes',         'type' => 'mondays_month',  'target' => 4,  'bonus_pts' => 500, 'tier_req' => 'gold',   'active' => 1, 'created_at' => $now ] );
     }
+
+    // Crear rol de staff si no existe
+    if ( ! get_role('erbl_staff') ) {
+        add_role( 'erbl_staff', 'Rancho Staff', [
+            'read'               => true,
+            'erbl_staff_consume' => true,
+        ] );
+    }
 }
 add_action( 'after_switch_theme', 'erbl_install' );
 add_action( 'after_switch_theme', function() {
@@ -1033,6 +1041,9 @@ function elrancho_loyalty_default_settings() {
         'cat_mult_cakes_slug'  => 'custom-cakes',
         // ── Caducidad ───────────────────────────────
         'expiry_months'        => 12,      // meses sin actividad
+        // ── Staff & Tienda física ────────────────────
+        'staff_pin'            => '',      // PIN de 4 dígitos para cajeros (vacío = deshabilitado)
+        'redeem_min_store'     => 0,       // compra mínima en tienda para redimir (0 = sin mínimo)
     ];
 }
 
@@ -1536,9 +1547,24 @@ add_action( 'rest_api_init', function() {
         'args' => [ 'code' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
     register_rest_route( $ns, '/redeem-token',         [ 'methods' => 'POST', 'callback' => 'erbl_api_redeem_token',         'permission_callback' => $auth,
         'args' => [ 'points' => [ 'required' => true, 'validate_callback' => 'is_numeric' ] ] ] );
-    register_rest_route( $ns, '/redeem-token/consume', [ 'methods' => 'POST', 'callback' => 'erbl_api_consume_redeem_token', 'permission_callback' => function() {
-        return current_user_can('manage_woocommerce') || ( defined('REST_REQUEST') && REST_REQUEST && current_user_can('manage_woocommerce') );
-    }, 'args' => [ 'token' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
+    $staff_auth = function( $request ) {
+        if ( current_user_can('manage_woocommerce') || current_user_can('erbl_staff_consume') ) { return true; }
+        $pin = sanitize_text_field( $request->get_param('staff_pin') ?? '' );
+        if ( ! $pin ) { return false; }
+        $s = elrancho_loyalty_get_settings();
+        return $s['staff_pin'] !== '' && $pin === $s['staff_pin'];
+    };
+    register_rest_route( $ns, '/redeem-token/preview', [ 'methods' => 'POST', 'callback' => 'erbl_api_preview_redeem_token', 'permission_callback' => $staff_auth,
+        'args' => [ 'token' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
+    register_rest_route( $ns, '/redeem-token/consume', [ 'methods' => 'POST', 'callback' => 'erbl_api_consume_redeem_token', 'permission_callback' => $staff_auth,
+        'args' => [ 'token' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
+    register_rest_route( $ns, '/staff/create-user',   [ 'methods' => 'POST', 'callback' => 'erbl_api_create_staff_user',   'permission_callback' => function() { return current_user_can('manage_woocommerce'); },
+        'args' => [
+            'username' => [ 'required' => true,  'sanitize_callback' => 'sanitize_user' ],
+            'email'    => [ 'required' => true,  'sanitize_callback' => 'sanitize_email' ],
+            'password' => [ 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ],
+            'name'     => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+        ] ] );
     register_rest_route( $ns, '/profile',              [ 'methods' => 'PUT',  'callback' => 'erbl_api_update_profile',       'permission_callback' => $auth,
         'args' => [ 'birthday' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
 } );
@@ -1625,6 +1651,28 @@ function erbl_api_redeem_token( $request ) {
     return rest_ensure_response( [ 'token'=>$token,'points'=>$pts,'value_usd'=>round($pts*floatval($settings['point_value']),2),'expires_in'=>1800,'qr_data'=>json_encode(['token'=>$token,'pts'=>$pts]) ] );
 }
 
+function erbl_api_preview_redeem_token( $request ) {
+    $token = sanitize_text_field( $request->get_param('token') );
+    $data  = get_transient( 'erbl_redeem_' . $token );
+    if ( ! $data ) { return new WP_Error('invalid_token', 'Token inválido o expirado.', ['status' => 404]); }
+    $uid      = intval($data['user_id']);
+    $pts      = intval($data['points']);
+    $settings = elrancho_loyalty_get_settings();
+    $pv       = floatval($settings['point_value']);
+    $user     = get_userdata($uid);
+    $tier     = erbl_get_user_tier($uid);
+    return rest_ensure_response([
+        'valid'       => true,
+        'token'       => $token,
+        'user'        => $user ? $user->display_name : '#' . $uid,
+        'tier'        => $tier,
+        'tier_label'  => erbl_tier_label($tier),
+        'points'      => $pts,
+        'value_usd'   => round($pts * $pv, 2),
+        'balance_after' => max(0, erbl_get_user_points($uid) - $pts),
+    ]);
+}
+
 function erbl_api_consume_redeem_token( $request ) {
     $token = sanitize_text_field( $request->get_param('token') );
     $data  = get_transient( 'erbl_redeem_' . $token );
@@ -1634,10 +1682,12 @@ function erbl_api_consume_redeem_token( $request ) {
     $bal  = erbl_adjust_points( $uid, -$pts, 'redemption', 0, 'Redención en tienda física' );
     delete_transient( 'erbl_redeem_' . $token );
     $user = get_userdata($uid);
+    $settings = elrancho_loyalty_get_settings();
     return rest_ensure_response([
         'success'     => true,
         'user'        => $user ? $user->display_name : '#' . $uid,
         'points_used' => $pts,
+        'value_usd'   => round($pts * floatval($settings['point_value']), 2),
         'new_balance' => $bal,
     ]);
 }
@@ -1655,6 +1705,21 @@ function erbl_api_update_profile( $request ) {
     }
     if ( empty($updated) ) { return new WP_Error('no_data', 'No se proporcionaron datos para actualizar.', ['status' => 400]); }
     return rest_ensure_response(['success' => true, 'updated' => $updated]);
+}
+
+function erbl_api_create_staff_user( $request ) {
+    $username = sanitize_user( $request->get_param('username') );
+    $email    = sanitize_email( $request->get_param('email') );
+    $password = $request->get_param('password');
+    $name     = sanitize_text_field( $request->get_param('name') ?? $username );
+    if ( username_exists($username) ) { return new WP_Error('user_exists', 'El usuario ya existe.', ['status' => 400]); }
+    if ( email_exists($email) )       { return new WP_Error('email_exists', 'El email ya está registrado.', ['status' => 400]); }
+    $uid = wp_create_user( $username, $password, $email );
+    if ( is_wp_error($uid) ) { return new WP_Error('create_failed', $uid->get_error_message(), ['status' => 500]); }
+    $user = new WP_User($uid);
+    $user->set_role('erbl_staff');
+    wp_update_user(['ID' => $uid, 'display_name' => $name, 'first_name' => $name]);
+    return rest_ensure_response(['success' => true, 'user_id' => $uid, 'username' => $username, 'role' => 'erbl_staff']);
 }
 
 /* --------------------------------------------------
@@ -2289,6 +2354,11 @@ function erbl_admin_page_full() {
             <h2>Caducidad</h2>
             <table class="form-table">
                 <tr><th>Meses sin actividad</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[expiry_months]" value="<?php echo esc_attr($s['expiry_months']);?>"><p class="description">0 = nunca caducan.</p></td></tr>
+            </table>
+            <h2>Staff & Tienda física</h2>
+            <table class="form-table">
+                <tr><th>PIN del cajero</th><td><input type="text" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" class="small-text" name="elrancho_loyalty_settings[staff_pin]" value="<?php echo esc_attr($s['staff_pin']); ?>" placeholder="ej. 1234"><p class="description">PIN numérico para autenticar cajeros en la página de staff. Vacío = deshabilitado. URL: <code><?php echo esc_url(home_url('/rancho-staff/')); ?></code></p></td></tr>
+                <tr><th>Compra mínima en tienda (USD)</th><td><input type="number" min="0" step="0.01" class="small-text" name="elrancho_loyalty_settings[redeem_min_store]" value="<?php echo esc_attr($s['redeem_min_store']); ?>"><p class="description">0 = sin mínimo.</p></td></tr>
             </table>
             <?php submit_button('Guardar configuración');?>
         </form>
