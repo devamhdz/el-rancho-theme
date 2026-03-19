@@ -40,6 +40,13 @@
           "iosDisplayInForeground": true
         }
       ]
-    ]
+    ],
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "4c40a61d-e416-4c2c-be3d-698f82cb2587"
+      }
+    },
+    "owner": "devamhdz"
   }
 }
