@@ -62,9 +62,12 @@ export function usePushNotifications(isAuthenticated: boolean) {
 
     // Pedir permisos y registrar token
     registerForPushAsync().then((token) => {
-      if (!token) return;
+      console.log('[push] token obtenido:', token);
+      if (!token) { console.log('[push] token nulo, abortando registro'); return; }
       AsyncStorage.setItem(PUSH_TOKEN_KEY, token);
-      registerPushToken(token, Platform.OS).catch(() => {});
+      registerPushToken(token, Platform.OS)
+        .then((r) => console.log('[push] registro exitoso:', r))
+        .catch((e) => console.log('[push] error al registrar:', e));
     });
 
     // Notificación recibida en foreground (solo logging, ya se muestra por setNotificationHandler)
@@ -100,17 +103,22 @@ async function registerForPushAsync(): Promise<string | null> {
     Constants.expoConfig?.extra?.eas?.projectId ??
     (Constants as unknown as { easConfig?: { projectId?: string } }).easConfig?.projectId;
 
+  console.log('[push] projectId:', projectId);
   try {
     const tokenData = await Notifications.getExpoPushTokenAsync(
       projectId ? { projectId } : undefined,
     );
+    console.log('[push] getExpoPushTokenAsync OK:', tokenData.data);
     return tokenData.data;
-  } catch {
+  } catch (e) {
+    console.log('[push] getExpoPushTokenAsync falló:', e);
     // Fallback: token nativo del dispositivo (útil en desarrollo sin EAS projectId)
     try {
       const deviceToken = await Notifications.getDevicePushTokenAsync();
+      console.log('[push] getDevicePushTokenAsync OK:', deviceToken.data);
       return deviceToken.data as string;
-    } catch {
+    } catch (e2) {
+      console.log('[push] getDevicePushTokenAsync falló:', e2);
       return null;
     }
   }
