@@ -15,7 +15,8 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.devamhdz.elranchobakery",
       "infoPlist": {
-        "NSUserNotificationsUsageDescription": "Recibe notificaciones sobre tus puntos, pedidos y promociones."
+        "NSUserNotificationsUsageDescription": "Recibe notificaciones sobre tus puntos, pedidos y promociones.",
+        "ITSAppUsesNonExemptEncryption": false
       }
     },
     "android": {
