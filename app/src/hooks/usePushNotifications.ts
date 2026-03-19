@@ -106,7 +106,13 @@ async function registerForPushAsync(): Promise<string | null> {
     );
     return tokenData.data;
   } catch {
-    return null;
+    // Fallback: token nativo del dispositivo (útil en desarrollo sin EAS projectId)
+    try {
+      const deviceToken = await Notifications.getDevicePushTokenAsync();
+      return deviceToken.data as string;
+    } catch {
+      return null;
+    }
   }
 }
 
