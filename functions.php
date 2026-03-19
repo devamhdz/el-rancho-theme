@@ -753,6 +753,7 @@ function elrancho_enqueue_scripts() {
 }
 add_action('wp_enqueue_scripts', 'elrancho_enqueue_scripts');
 
+
 /* =============================================
    WOOCOMMERCE - HOOKS Y PERSONALIZACIONES
    ============================================= */
@@ -918,6 +919,9 @@ add_filter('woocommerce_checkout_fields', function($fields) {
     return $fields;
 });
 
+// Disable WooCommerce Store API nonce check for mobile app (Cart-Token provides session security)
+add_filter( 'woocommerce_store_api_disable_nonce_check', '__return_true' );
+
 /* =============================================
    LOYALTY MODULE — RANCHO REWARDS
    Versión 2.0 — Sistema completo con tiers,
@@ -958,6 +962,7 @@ function erbl_install() {
         type        VARCHAR(40)     NOT NULL DEFAULT 'orders_count',
         target      INT UNSIGNED    NOT NULL DEFAULT 1,
         bonus_pts   INT UNSIGNED    NOT NULL DEFAULT 100,
+        reward_id   INT UNSIGNED    NOT NULL DEFAULT 0,
         tier_req    VARCHAR(20)     NOT NULL DEFAULT 'bronze',
         active      TINYINT(1)      NOT NULL DEFAULT 1,
         expires_at  DATETIME                 DEFAULT NULL,
@@ -976,7 +981,63 @@ function erbl_install() {
         UNIQUE KEY user_challenge (user_id, challenge_id)
     ) $charset;" );
 
-    update_option( 'erbl_db_version', '2.0' );
+    $t_rw = $wpdb->prefix . 'erbl_rewards';
+    dbDelta( "CREATE TABLE $t_rw (
+        id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        name        VARCHAR(120)    NOT NULL DEFAULT '',
+        description VARCHAR(255)    NOT NULL DEFAULT '',
+        points_cost INT UNSIGNED    NOT NULL DEFAULT 0,
+        active      TINYINT(1)      NOT NULL DEFAULT 1,
+        sort_order  INT             NOT NULL DEFAULT 0,
+        created_at  DATETIME        NOT NULL,
+        PRIMARY KEY (id),
+        KEY active (active)
+    ) $charset;" );
+
+    $t_ar = $wpdb->prefix . 'erbl_assigned_rewards';
+    dbDelta( "CREATE TABLE $t_ar (
+        id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id     BIGINT UNSIGNED NOT NULL,
+        reward_id   BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        reward_name VARCHAR(120)    NOT NULL DEFAULT '',
+        note        VARCHAR(255)    NOT NULL DEFAULT '',
+        assigned_by BIGINT UNSIGNED NOT NULL DEFAULT 0,
+        assigned_at DATETIME        NOT NULL,
+        expires_at  DATETIME        NULL DEFAULT NULL,
+        redeemed_at DATETIME        NULL DEFAULT NULL,
+        PRIMARY KEY (id),
+        KEY user_id (user_id),
+        KEY redeemed_at (redeemed_at)
+    ) $charset;" );
+
+    $t_pt = $wpdb->prefix . 'erbl_push_tokens';
+    dbDelta( "CREATE TABLE $t_pt (
+        id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_id     BIGINT UNSIGNED NOT NULL,
+        token       VARCHAR(255)    NOT NULL DEFAULT '',
+        platform    VARCHAR(20)     NOT NULL DEFAULT 'unknown',
+        created_at  DATETIME        NOT NULL,
+        updated_at  DATETIME        NOT NULL,
+        PRIMARY KEY (id),
+        UNIQUE KEY token (token),
+        KEY user_id (user_id)
+    ) $charset;" );
+
+    $t_pl = $wpdb->prefix . 'erbl_push_log';
+    dbDelta( "CREATE TABLE $t_pl (
+        id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+        user_ids      TEXT            NOT NULL DEFAULT '',
+        title         VARCHAR(120)    NOT NULL DEFAULT '',
+        body          VARCHAR(255)    NOT NULL DEFAULT '',
+        data          TEXT            NOT NULL DEFAULT '',
+        sent_count    INT UNSIGNED    NOT NULL DEFAULT 0,
+        failed_count  INT UNSIGNED    NOT NULL DEFAULT 0,
+        sent_at       DATETIME        NOT NULL,
+        PRIMARY KEY (id),
+        KEY sent_at (sent_at)
+    ) $charset;" );
+
+    update_option( 'erbl_db_version', '2.4' );
 
     // Insertar retos de ejemplo si la tabla está vacía
     $has = $wpdb->get_var( "SELECT COUNT(*) FROM $t_ch" );
@@ -1002,10 +1063,17 @@ add_action( 'after_switch_theme', function() {
     flush_rewrite_rules();
 } );
 add_action( 'init', function() {
-    if ( get_option('erbl_db_version') !== '2.0' ) {
+    if ( get_option('erbl_db_version') !== '2.4' ) {
         erbl_install();
     }
 });
+
+// Auto-upgrade DB if needed (e.g. new tables added in future versions)
+add_action( 'admin_init', function() {
+    if ( get_option('erbl_db_version') !== '2.4' && current_user_can('manage_woocommerce') ) {
+        erbl_install();
+    }
+} );
 
 /* --------------------------------------------------
    2. CONFIGURACIÓN
@@ -1044,6 +1112,9 @@ function elrancho_loyalty_default_settings() {
         // ── Staff & Tienda física ────────────────────
         'staff_pin'            => '',      // PIN de 4 dígitos para cajeros (vacío = deshabilitado)
         'redeem_min_store'     => 0,       // compra mínima en tienda para redimir (0 = sin mínimo)
+        // ── Cumpleaños ───────────────────────────────
+        'birthday_reward_id'   => 0,
+        'birthday_reward_name' => '',
     ];
 }
 
@@ -1093,6 +1164,10 @@ function elrancho_loyalty_sanitize_settings( $input ) {
         'cat_mult_cakes'       => max( 1, floatval( $input['cat_mult_cakes']       ?? $d['cat_mult_cakes'] ) ),
         'cat_mult_cakes_slug'  => sanitize_key( $input['cat_mult_cakes_slug']      ?? $d['cat_mult_cakes_slug'] ),
         'expiry_months'        => max( 0, intval( $input['expiry_months']          ?? $d['expiry_months'] ) ),
+        'staff_pin'            => preg_replace( '/\D/', '', $input['staff_pin']    ?? $d['staff_pin'] ),
+        'redeem_min_store'     => max( 0, floatval( $input['redeem_min_store']     ?? $d['redeem_min_store'] ) ),
+        'birthday_reward_id'   => max(0, intval($input['birthday_reward_id'] ?? $d['birthday_reward_id'])),
+        'birthday_reward_name' => sanitize_text_field($input['birthday_reward_name'] ?? $d['birthday_reward_name']),
     ];
 }
 
@@ -1171,6 +1246,17 @@ function erbl_get_user_multiplier( $user_id ) {
         $bday_ts        = strtotime($bday_this_year);
         if ( $bday_ts && abs( $today - $bday_ts ) <= ( 3 * DAY_IN_SECONDS ) ) {
             $mult *= floatval( $settings['bonus_birthday_mult'] );
+            // Auto-assign birthday reward (once per year)
+            $bday_year_key = '_erbl_bday_reward_' . date('Y');
+            if ( ! get_user_meta( $user_id, $bday_year_key, true ) ) {
+                $bday_rid  = intval( $settings['birthday_reward_id'] ?? 0 );
+                $bday_rname = sanitize_text_field( $settings['birthday_reward_name'] ?? '' );
+                if ( $bday_rid > 0 || $bday_rname ) {
+                    $expires = date('Y-m-d 23:59:59', strtotime('+7 days'));
+                    erbl_assign_reward_to_user( $user_id, $bday_rid, $bday_rname, 0, 'Regalo de cumpleaños', $expires );
+                    update_user_meta( $user_id, $bday_year_key, 1 );
+                }
+            }
         }
     }
     return $mult;
@@ -1253,6 +1339,12 @@ function elrancho_loyalty_maybe_award_points( $order_id ) {
             . '</body></html>';
         wp_mail( $user->user_email, $subject, $body, ['Content-Type: text/html; charset=UTF-8'] );
     }
+    erbl_send_push(
+        [ $user_id ],
+        sprintf( '🎉 +%d puntos ganados', $points ),
+        sprintf( 'Saldo: %s pts · Nivel: %s', number_format($new_balance), $new_tier ),
+        [ 'type' => 'points_earned', 'points' => $points, 'balance' => $new_balance ]
+    );
 }
 add_action( 'woocommerce_order_status_processing', 'elrancho_loyalty_maybe_award_points' );
 add_action( 'woocommerce_order_status_completed',  'elrancho_loyalty_maybe_award_points' );
@@ -1317,7 +1409,86 @@ function erbl_maybe_award_referral_bonus( $user_id, $order_id, $settings ) {
             . '</body></html>';
         wp_mail($referrer_data->user_email, $subject, $body, ['Content-Type: text/html; charset=UTF-8']);
     }
+    erbl_send_push(
+        [ $referrer_id ],
+        '🤝 ¡Referido exitoso!',
+        sprintf( '%s hizo su primera compra. +%d pts', $referred_name, intval($settings['bonus_referrer']) ),
+        [ 'type' => 'referral_bonus', 'points' => intval($settings['bonus_referrer']) ]
+    );
     update_user_meta( $user_id, '_erbl_referred_by', $referrer_id );
+}
+
+/* --------------------------------------------------
+   PUSH NOTIFICATIONS
+   -------------------------------------------------- */
+
+function erbl_get_push_tokens_for_users( array $user_ids ) {
+    global $wpdb;
+    if ( empty($user_ids) ) { return []; }
+    $t    = $wpdb->prefix . 'erbl_push_tokens';
+    $phs  = implode( ',', array_fill(0, count($user_ids), '%d') );
+    return $wpdb->get_col( $wpdb->prepare( "SELECT token FROM $t WHERE user_id IN ($phs)", ...$user_ids ) );
+}
+
+/**
+ * Envía push notifications vía Expo Push API.
+ *
+ * @param int[]  $user_ids  IDs de usuarios destino. Vacío = nadie.
+ * @param string $title
+ * @param string $body
+ * @param array  $data      Payload extra para la app.
+ * @return array{sent:int, failed:int}
+ */
+function erbl_send_push( array $user_ids, string $title, string $body, array $data = [] ): array {
+    global $wpdb;
+    if ( empty($user_ids) ) { return ['sent' => 0, 'failed' => 0]; }
+
+    $tokens = erbl_get_push_tokens_for_users( $user_ids );
+    if ( empty($tokens) ) { return ['sent' => 0, 'failed' => 0]; }
+
+    $messages = array_map( fn( $t ) => [
+        'to'    => $t,
+        'title' => $title,
+        'body'  => $body,
+        'data'  => $data,
+        'sound' => 'default',
+    ], $tokens );
+
+    $response = wp_remote_post( 'https://exp.host/--/api/v2/push/send', [
+        'headers' => [ 'Content-Type' => 'application/json', 'Accept' => 'application/json' ],
+        'body'    => wp_json_encode( $messages ),
+        'timeout' => 15,
+    ] );
+
+    $sent = $failed = 0;
+    if ( ! is_wp_error($response) ) {
+        $decoded = json_decode( wp_remote_retrieve_body($response), true );
+        foreach ( (array)($decoded['data'] ?? []) as $r ) {
+            ( ($r['status'] ?? '') === 'ok' ) ? $sent++ : $failed++;
+        }
+    } else {
+        $failed = count($tokens);
+    }
+
+    $wpdb->insert( $wpdb->prefix . 'erbl_push_log', [
+        'user_ids'    => wp_json_encode( $user_ids ),
+        'title'       => substr( $title, 0, 120 ),
+        'body'        => substr( $body,  0, 255 ),
+        'data'        => wp_json_encode( $data ),
+        'sent_count'  => $sent,
+        'failed_count'=> $failed,
+        'sent_at'     => current_time('mysql'),
+    ] );
+
+    return compact('sent', 'failed');
+}
+
+function erbl_send_push_broadcast( string $title, string $body, array $data = [] ): array {
+    global $wpdb;
+    $user_ids = array_map( 'intval', $wpdb->get_col(
+        "SELECT DISTINCT user_id FROM {$wpdb->prefix}erbl_push_tokens WHERE token != ''"
+    ) );
+    return erbl_send_push( $user_ids, $title, $body, $data );
 }
 
 function erbl_get_user_by_referral_code( $code ) {
@@ -1478,7 +1649,12 @@ function erbl_check_challenges_on_order( $user_id, $order ) {
             $wpdb->insert( $t_cp, [ 'user_id' => $user_id, 'challenge_id' => $ch->id, 'progress' => $new_p, 'completed' => $done, 'completed_at' => $done_at ], [ '%d','%d','%d','%d','%s' ] );
         }
         if ( $done ) {
-            erbl_adjust_points( $user_id, intval($ch->bonus_pts), 'challenge', $ch->id, 'Reto completado: ' . $ch->title );
+            if ( intval($ch->bonus_pts) > 0 ) {
+                erbl_adjust_points( $user_id, intval($ch->bonus_pts), 'challenge', $ch->id, 'Reto completado: ' . $ch->title );
+            }
+            if ( intval($ch->reward_id) > 0 ) {
+                erbl_assign_reward_to_user( $user_id, intval($ch->reward_id), '', 0, 'Reto completado: ' . $ch->title );
+            }
         }
     }
 }
@@ -1546,7 +1722,7 @@ add_action( 'rest_api_init', function() {
     register_rest_route( $ns, '/referral/apply',  [ 'methods' => 'POST', 'callback' => 'erbl_api_apply_referral',  'permission_callback' => $auth,
         'args' => [ 'code' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
     register_rest_route( $ns, '/redeem-token',         [ 'methods' => 'POST', 'callback' => 'erbl_api_redeem_token',         'permission_callback' => $auth,
-        'args' => [ 'points' => [ 'required' => true, 'validate_callback' => 'is_numeric' ] ] ] );
+        'args' => [ 'points' => [ 'required' => true, 'validate_callback' => function($v) { return is_numeric($v); } ] ] ] );
     $staff_auth = function( $request ) {
         if ( current_user_can('manage_woocommerce') || current_user_can('erbl_staff_consume') ) { return true; }
         $pin = sanitize_text_field( $request->get_param('staff_pin') ?? '' );
@@ -1567,7 +1743,121 @@ add_action( 'rest_api_init', function() {
         ] ] );
     register_rest_route( $ns, '/profile',              [ 'methods' => 'PUT',  'callback' => 'erbl_api_update_profile',       'permission_callback' => $auth,
         'args' => [ 'birthday' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ] ] ] );
+    register_rest_route( $ns, '/rewards',                        [ 'methods' => 'GET',  'callback' => 'erbl_api_rewards_catalog', 'permission_callback' => $auth ] );
+    register_rest_route( $ns, '/rewards/(?P<id>\d+)/redeem',     [ 'methods' => 'POST', 'callback' => 'erbl_api_redeem_reward',   'permission_callback' => $auth ] );
+    register_rest_route( $ns, '/staff/redemptions',   [ 'methods' => 'GET',  'callback' => 'erbl_api_staff_redemptions',    'permission_callback' => $staff_auth ] );
+    register_rest_route( $ns, '/orders', [ 'methods' => 'GET', 'callback' => 'erbl_api_orders', 'permission_callback' => $auth,
+        'args' => [
+            'page'     => [ 'required' => false, 'default' => 1,  'sanitize_callback' => 'absint' ],
+            'per_page' => [ 'required' => false, 'default' => 20, 'sanitize_callback' => 'absint' ],
+        ] ] );
+    register_rest_route( $ns, '/register', [ 'methods' => 'POST', 'callback' => 'erbl_api_register', 'permission_callback' => '__return_true',
+        'args' => [
+            'email'      => [ 'required' => true,  'sanitize_callback' => 'sanitize_email' ],
+            'password'   => [ 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ],
+            'first_name' => [ 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ],
+            'last_name'  => [ 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ],
+            'birthday'   => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field' ],
+        ] ] );
+    register_rest_route( $ns, '/carousel', [ 'methods' => 'GET', 'callback' => 'erbl_api_carousel', 'permission_callback' => '__return_true' ] );
+    register_rest_route( $ns, '/cart-nonce', [ 'methods' => 'GET', 'callback' => function() {
+        return new WP_REST_Response( [ 'nonce' => wp_create_nonce( 'wc_store_api' ) ], 200 );
+    }, 'permission_callback' => '__return_true' ] );
+    register_rest_route( $ns, '/assigned-rewards', [
+        'methods'             => 'GET',
+        'callback'            => 'erbl_api_get_assigned_rewards',
+        'permission_callback' => $auth,
+    ] );
+    register_rest_route( $ns, '/assigned-rewards/(?P<id>\d+)/token', [
+        'methods'             => 'POST',
+        'callback'            => 'erbl_api_assigned_reward_token',
+        'permission_callback' => $auth,
+        'args'                => [
+            'id' => [ 'validate_callback' => function($v){ return is_numeric($v); } ],
+        ],
+    ] );
+
+    // Push notifications
+    register_rest_route( $ns, '/push/register', [
+        'methods'             => 'POST',
+        'callback'            => 'erbl_api_push_register',
+        'permission_callback' => $auth,
+        'args'                => [
+            'token'    => [ 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ],
+            'platform' => [ 'required' => false, 'sanitize_callback' => 'sanitize_text_field', 'default' => 'unknown' ],
+        ],
+    ] );
+    register_rest_route( $ns, '/push/unregister', [
+        'methods'             => 'DELETE',
+        'callback'            => 'erbl_api_push_unregister',
+        'permission_callback' => $auth,
+        'args'                => [
+            'token' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
+        ],
+    ] );
+    register_rest_route( $ns, '/push/send', [
+        'methods'             => 'POST',
+        'callback'            => 'erbl_api_push_send_admin',
+        'permission_callback' => function() { return current_user_can('manage_woocommerce'); },
+        'args'                => [
+            'title'   => [ 'required' => true,  'sanitize_callback' => 'sanitize_text_field' ],
+            'body'    => [ 'required' => true,  'sanitize_callback' => 'sanitize_textarea_field' ],
+            'user_id' => [ 'required' => false, 'sanitize_callback' => 'absint', 'default' => 0 ],
+        ],
+    ] );
+
+    // Login desde la app móvil: valida credenciales de WP y devuelve un Application Password
+    register_rest_route( $ns, '/auth/login', [
+        'methods'             => 'POST',
+        'callback'            => 'erbl_api_login',
+        'permission_callback' => '__return_true',
+        'args'                => [
+            'username' => [ 'required' => true, 'sanitize_callback' => 'sanitize_text_field' ],
+            'password' => [ 'required' => true ],
+        ],
+    ] );
 } );
+
+function erbl_api_login( WP_REST_Request $request ) {
+    $username = $request->get_param('username');
+    $password = $request->get_param('password');
+
+    // Acepta email o nombre de usuario
+    if ( is_email( $username ) ) {
+        $user = get_user_by( 'email', $username );
+        if ( $user ) $username = $user->user_login;
+    }
+
+    $user = wp_authenticate( $username, $password );
+
+    if ( is_wp_error( $user ) ) {
+        return new WP_Error( 'invalid_credentials', 'Usuario o contraseña incorrectos.', [ 'status' => 401 ] );
+    }
+
+    if ( ! class_exists('WP_Application_Passwords') ) {
+        return new WP_Error( 'app_passwords_unavailable', 'Application Passwords no disponible (requiere WP 5.6+).', [ 'status' => 500 ] );
+    }
+
+    // Elimina el app password anterior de esta app si existe, y crea uno nuevo
+    $app_name = 'El Rancho App';
+    $existing = WP_Application_Passwords::get_user_application_passwords( $user->ID );
+    foreach ( $existing as $ap ) {
+        if ( $ap['name'] === $app_name ) {
+            WP_Application_Passwords::delete_application_password( $user->ID, $ap['uuid'] );
+            break;
+        }
+    }
+
+    [ $app_password ] = WP_Application_Passwords::create_new_application_password( $user->ID, [ 'name' => $app_name ] );
+
+    return [
+        'user_id'      => $user->ID,
+        'username'     => $user->user_login,
+        'email'        => $user->user_email,
+        'display_name' => $user->display_name,
+        'app_password' => $app_password, // Solo se devuelve una vez; la app lo guarda localmente
+    ];
+}
 
 function erbl_api_wallet( $request ) {
     $uid       = get_current_user_id();
@@ -1648,48 +1938,326 @@ function erbl_api_redeem_token( $request ) {
     if ( $pts > $balance )                            { return new WP_Error('insufficient','No tienes suficientes puntos.',['status'=>400]); }
     $token = wp_generate_password(24, false);
     set_transient( 'erbl_redeem_' . $token, [ 'user_id'=>$uid,'points'=>$pts ], 30 * MINUTE_IN_SECONDS );
-    return rest_ensure_response( [ 'token'=>$token,'points'=>$pts,'value_usd'=>round($pts*floatval($settings['point_value']),2),'expires_in'=>1800,'qr_data'=>json_encode(['token'=>$token,'pts'=>$pts]) ] );
+    $value_usd = round( $pts * floatval($settings['point_value']), 2 );
+    erbl_send_push(
+        [ $uid ],
+        '🏪 Token de redención generado',
+        sprintf( 'Muestra el QR en caja para descontar $%.2f USD (%d pts)', $value_usd, $pts ),
+        [ 'type' => 'redeem_token', 'points' => $pts, 'value_usd' => $value_usd ]
+    );
+    return rest_ensure_response( [ 'token'=>$token,'points'=>$pts,'value_usd'=>$value_usd,'expires_in'=>1800,'qr_data'=>json_encode(['token'=>$token,'pts'=>$pts]) ] );
 }
 
 function erbl_api_preview_redeem_token( $request ) {
     $token = sanitize_text_field( $request->get_param('token') );
-    $data  = get_transient( 'erbl_redeem_' . $token );
-    if ( ! $data ) { return new WP_Error('invalid_token', 'Token inválido o expirado.', ['status' => 404]); }
-    $uid      = intval($data['user_id']);
-    $pts      = intval($data['points']);
     $settings = elrancho_loyalty_get_settings();
     $pv       = floatval($settings['point_value']);
-    $user     = get_userdata($uid);
-    $tier     = erbl_get_user_tier($uid);
-    return rest_ensure_response([
-        'valid'       => true,
-        'token'       => $token,
-        'user'        => $user ? $user->display_name : '#' . $uid,
-        'tier'        => $tier,
-        'tier_label'  => erbl_tier_label($tier),
-        'points'      => $pts,
-        'value_usd'   => round($pts * $pv, 2),
-        'balance_after' => max(0, erbl_get_user_points($uid) - $pts),
-    ]);
+
+    // Try points-to-cash redemption token
+    $data = get_transient( 'erbl_redeem_' . $token );
+    if ( $data ) {
+        $uid  = intval($data['user_id']);
+        $pts  = intval($data['points']);
+        $user = get_userdata($uid);
+        $tier = erbl_get_user_tier($uid);
+        return rest_ensure_response([
+            'valid'         => true,
+            'token_type'    => 'points',
+            'token'         => $token,
+            'user'          => $user ? $user->display_name : '#' . $uid,
+            'tier'          => $tier,
+            'tier_label'    => erbl_tier_label($tier),
+            'points'        => $pts,
+            'value_usd'     => round($pts * $pv, 2),
+            'balance_after' => max(0, erbl_get_user_points($uid) - $pts),
+        ]);
+    }
+
+    // Try reward token
+    $data = get_transient( 'erbl_rwd_' . $token );
+    if ( $data ) {
+        $uid  = intval($data['user_id']);
+        $pts  = intval($data['points_cost']);
+        $user = get_userdata($uid);
+        $tier = erbl_get_user_tier($uid);
+        return rest_ensure_response([
+            'valid'               => true,
+            'token_type'          => 'reward',
+            'token'               => $token,
+            'user'                => $user ? $user->display_name : '#' . $uid,
+            'tier'                => $tier,
+            'tier_label'          => erbl_tier_label($tier),
+            'points'              => $pts,
+            'reward_id'           => intval($data['reward_id']),
+            'reward_name'         => $data['reward_name'],
+            'reward_description'  => $data['reward_description'] ?? '',
+            'balance_after'       => max(0, erbl_get_user_points($uid) - $pts),
+        ]);
+    }
+
+    // Try assigned-reward token (admin-gifted coupon)
+    $data = get_transient( 'erbl_arc_' . $token );
+    if ( $data ) {
+        $uid  = intval($data['user_id']);
+        $user = get_userdata($uid);
+        $tier = erbl_get_user_tier($uid);
+        return rest_ensure_response([
+            'valid'               => true,
+            'token_type'          => 'assigned_reward',
+            'token'               => $token,
+            'user'                => $user ? $user->display_name : '#' . $uid,
+            'tier'                => $tier,
+            'tier_label'          => erbl_tier_label($tier),
+            'reward_name'         => $data['reward_name'],
+            'note'                => $data['note'],
+            'balance_after'       => erbl_get_user_points($uid),
+        ]);
+    }
+
+    return new WP_Error('invalid_token', 'Token inválido o expirado.', ['status' => 404]);
 }
 
 function erbl_api_consume_redeem_token( $request ) {
-    $token = sanitize_text_field( $request->get_param('token') );
-    $data  = get_transient( 'erbl_redeem_' . $token );
-    if ( ! $data ) { return new WP_Error('invalid_token', 'Token inválido o expirado.', ['status' => 404]); }
-    $uid  = intval($data['user_id']);
-    $pts  = intval($data['points']);
-    $bal  = erbl_adjust_points( $uid, -$pts, 'redemption', 0, 'Redención en tienda física' );
-    delete_transient( 'erbl_redeem_' . $token );
-    $user = get_userdata($uid);
+    $token    = sanitize_text_field( $request->get_param('token') );
     $settings = elrancho_loyalty_get_settings();
+
+    // Try points-to-cash redemption
+    $data = get_transient( 'erbl_redeem_' . $token );
+    if ( $data ) {
+        $uid  = intval($data['user_id']);
+        $pts  = intval($data['points']);
+        $bal  = erbl_adjust_points( $uid, -$pts, 'redemption', 0, 'Redención en tienda física' );
+        delete_transient( 'erbl_redeem_' . $token );
+        $user = get_userdata($uid);
+        return rest_ensure_response([
+            'success'     => true,
+            'token_type'  => 'points',
+            'user'        => $user ? $user->display_name : '#' . $uid,
+            'points_used' => $pts,
+            'value_usd'   => round($pts * floatval($settings['point_value']), 2),
+            'new_balance' => $bal,
+        ]);
+    }
+
+    // Try reward token
+    $data = get_transient( 'erbl_rwd_' . $token );
+    if ( $data ) {
+        $uid  = intval($data['user_id']);
+        $pts  = intval($data['points_cost']);
+        $bal  = erbl_adjust_points( $uid, -$pts, 'reward_redemption', intval($data['reward_id']), 'Recompensa: ' . sanitize_text_field($data['reward_name']) );
+        delete_transient( 'erbl_rwd_' . $token );
+        $user = get_userdata($uid);
+        return rest_ensure_response([
+            'success'     => true,
+            'token_type'  => 'reward',
+            'user'        => $user ? $user->display_name : '#' . $uid,
+            'reward_name' => $data['reward_name'],
+            'points_used' => $pts,
+            'new_balance' => $bal,
+        ]);
+    }
+
+    // Try assigned-reward token (admin-gifted coupon — no point deduction)
+    $data = get_transient( 'erbl_arc_' . $token );
+    if ( $data ) {
+        global $wpdb;
+        $uid   = intval($data['user_id']);
+        $ar_id = intval($data['assigned_reward_id']);
+        $t_ar  = $wpdb->prefix . 'erbl_assigned_rewards';
+        // Mark as redeemed
+        $wpdb->update( $t_ar, ['redeemed_at' => current_time('mysql')], ['id' => $ar_id] );
+        delete_transient( 'erbl_arc_' . $token );
+        // Log in transactions (delta=0, just for audit)
+        $balance = erbl_get_user_points($uid);
+        $wpdb->insert( $wpdb->prefix . 'erbl_transactions', [
+            'user_id'    => $uid,
+            'delta'      => 0,
+            'balance'    => $balance,
+            'type'       => 'gift_redemption',
+            'ref_id'     => $ar_id,
+            'note'       => 'Cupón asignado: ' . sanitize_text_field($data['reward_name']),
+            'created_at' => current_time('mysql'),
+        ] );
+        $user = get_userdata($uid);
+        return rest_ensure_response([
+            'success'     => true,
+            'token_type'  => 'assigned_reward',
+            'user'        => $user ? $user->display_name : '#' . $uid,
+            'reward_name' => $data['reward_name'],
+            'note'        => $data['note'],
+            'new_balance' => $balance,
+        ]);
+    }
+
+    return new WP_Error('invalid_token', 'Token inválido o expirado.', ['status' => 404]);
+}
+
+function erbl_api_rewards_catalog( $request ) {
+    global $wpdb;
+    $t_rw   = $wpdb->prefix . 'erbl_rewards';
+    $uid    = get_current_user_id();
+    $points = erbl_get_user_points($uid);
+    $rows   = $wpdb->get_results("SELECT * FROM $t_rw WHERE active=1 ORDER BY sort_order ASC, id ASC");
+    $result = [];
+    foreach ($rows as $r) {
+        $result[] = [
+            'id'          => intval($r->id),
+            'name'        => $r->name,
+            'description' => $r->description,
+            'points_cost' => intval($r->points_cost),
+            'affordable'  => $points >= intval($r->points_cost),
+        ];
+    }
+    return rest_ensure_response($result);
+}
+
+function erbl_api_redeem_reward( $request ) {
+    global $wpdb;
+    $uid       = get_current_user_id();
+    $reward_id = intval($request['id']);
+    $t_rw      = $wpdb->prefix . 'erbl_rewards';
+    $reward    = $wpdb->get_row($wpdb->prepare("SELECT * FROM $t_rw WHERE id=%d AND active=1", $reward_id));
+    if ( ! $reward ) {
+        return new WP_Error('not_found', 'Recompensa no encontrada.', ['status' => 404]);
+    }
+    $points = erbl_get_user_points($uid);
+    if ( $points < intval($reward->points_cost) ) {
+        return new WP_Error('insufficient', 'Puntos insuficientes.', ['status' => 400]);
+    }
+    $token = wp_generate_password(24, false);
+    set_transient( 'erbl_rwd_' . $token, [
+        'user_id'            => $uid,
+        'reward_id'          => intval($reward->id),
+        'reward_name'        => $reward->name,
+        'reward_description' => $reward->description,
+        'points_cost'        => intval($reward->points_cost),
+    ], 30 * MINUTE_IN_SECONDS );
     return rest_ensure_response([
-        'success'     => true,
-        'user'        => $user ? $user->display_name : '#' . $uid,
-        'points_used' => $pts,
-        'value_usd'   => round($pts * floatval($settings['point_value']), 2),
-        'new_balance' => $bal,
+        'token'       => $token,
+        'reward_name' => $reward->name,
+        'points_cost' => intval($reward->points_cost),
+        'qr_data'     => json_encode(['token' => $token, 'type' => 'reward']),
+        'expires_in'  => 1800,
     ]);
+}
+
+/**
+ * Assign a reward coupon to a user (used by challenges, birthday, etc.)
+ *
+ * @param int    $user_id     Target user
+ * @param int    $reward_id   ID from wp_erbl_rewards (0 for custom name)
+ * @param string $reward_name Custom name — used when reward_id=0
+ * @param int    $assigned_by Admin user ID (0 = system)
+ * @param string $note        Internal note shown to staff
+ * @param string $expires_at  MySQL datetime or null
+ * @return int|false          Inserted row ID or false on failure
+ */
+function erbl_assign_reward_to_user( $user_id, $reward_id = 0, $reward_name = '', $assigned_by = 0, $note = '', $expires_at = null ) {
+    global $wpdb;
+    $t_rw = $wpdb->prefix . 'erbl_rewards';
+    $t_ar = $wpdb->prefix . 'erbl_assigned_rewards';
+    if ( $reward_id > 0 ) {
+        $rw = $wpdb->get_row( $wpdb->prepare( "SELECT name FROM $t_rw WHERE id=%d AND active=1", $reward_id ) );
+        if ( ! $rw ) return false;
+        $reward_name = $rw->name;
+    }
+    if ( ! $reward_name ) return false;
+    $wpdb->insert( $t_ar, [
+        'user_id'     => intval($user_id),
+        'reward_id'   => intval($reward_id),
+        'reward_name' => sanitize_text_field($reward_name),
+        'note'        => sanitize_text_field($note),
+        'assigned_by' => intval($assigned_by),
+        'assigned_at' => current_time('mysql'),
+        'expires_at'  => $expires_at,
+    ] );
+    return $wpdb->insert_id ?: false;
+}
+
+function erbl_api_get_assigned_rewards( $request ) {
+    global $wpdb;
+    $uid  = get_current_user_id();
+    $t_ar = $wpdb->prefix . 'erbl_assigned_rewards';
+    $rows = $wpdb->get_results( $wpdb->prepare(
+        "SELECT * FROM $t_ar WHERE user_id=%d AND redeemed_at IS NULL ORDER BY assigned_at DESC",
+        $uid
+    ) );
+    $result = [];
+    foreach ( $rows as $r ) {
+        $expired = $r->expires_at && strtotime($r->expires_at) < time();
+        if ( $expired ) continue;
+        $result[] = [
+            'id'          => intval($r->id),
+            'reward_name' => $r->reward_name,
+            'note'        => $r->note,
+            'assigned_at' => $r->assigned_at,
+            'expires_at'  => $r->expires_at,
+        ];
+    }
+    return rest_ensure_response($result);
+}
+
+function erbl_api_assigned_reward_token( $request ) {
+    global $wpdb;
+    $uid   = get_current_user_id();
+    $ar_id = intval($request['id']);
+    $t_ar  = $wpdb->prefix . 'erbl_assigned_rewards';
+    $ar    = $wpdb->get_row( $wpdb->prepare(
+        "SELECT * FROM $t_ar WHERE id=%d AND user_id=%d AND redeemed_at IS NULL",
+        $ar_id, $uid
+    ) );
+    if ( ! $ar ) {
+        return new WP_Error('not_found', 'Cupón no encontrado o ya canjeado.', ['status' => 404]);
+    }
+    if ( $ar->expires_at && strtotime($ar->expires_at) < time() ) {
+        return new WP_Error('expired', 'Este cupón ha expirado.', ['status' => 410]);
+    }
+    $token = wp_generate_password(24, false);
+    set_transient( 'erbl_arc_' . $token, [
+        'assigned_reward_id' => intval($ar->id),
+        'user_id'            => $uid,
+        'reward_name'        => $ar->reward_name,
+        'note'               => $ar->note,
+    ], 30 * MINUTE_IN_SECONDS );
+    return rest_ensure_response([
+        'token'       => $token,
+        'reward_name' => $ar->reward_name,
+        'qr_data'     => json_encode(['token' => $token, 'type' => 'assigned_reward']),
+        'expires_in'  => 1800,
+    ]);
+}
+
+function erbl_api_staff_redemptions( $request ) {
+    global $wpdb;
+    $t_tx     = $wpdb->prefix . 'erbl_transactions';
+    $settings = elrancho_loyalty_get_settings();
+    $pv       = floatval($settings['point_value']);
+    $limit    = min(50, max(1, intval($request->get_param('limit') ?? 20)));
+    $rows = $wpdb->get_results($wpdb->prepare(
+        "SELECT t.id, t.user_id, t.delta, t.balance, t.note, t.type, t.created_at, u.display_name
+         FROM $t_tx t LEFT JOIN {$wpdb->users} u ON u.ID = t.user_id
+         WHERE t.type IN ('redemption','reward_redemption','gift_redemption') AND t.delta <= 0
+         ORDER BY t.id DESC LIMIT %d",
+        $limit
+    ));
+    $result = [];
+    foreach ($rows as $r) {
+        $pts       = abs(intval($r->delta));
+        $is_reward = $r->type === 'reward_redemption';
+        $is_gift   = $r->type === 'gift_redemption';
+        $result[] = [
+            'id'           => intval($r->id),
+            'token_type'   => $is_gift ? 'assigned_reward' : ($is_reward ? 'reward' : 'points'),
+            'user'         => $r->display_name ?: '#' . $r->user_id,
+            'points'       => $pts,
+            'value_usd'    => ($is_reward || $is_gift) ? null : round($pts * $pv, 2),
+            'label'        => $is_gift ? $r->note : ($is_reward ? $r->note : ('$' . number_format(round($pts * $pv, 2), 2) . ' USD')),
+            'balance_after'=> intval($r->balance),
+            'note'         => $r->note,
+            'created_at'   => $r->created_at,
+        ];
+    }
+    return rest_ensure_response($result);
 }
 
 function erbl_api_update_profile( $request ) {
@@ -1705,6 +2273,188 @@ function erbl_api_update_profile( $request ) {
     }
     if ( empty($updated) ) { return new WP_Error('no_data', 'No se proporcionaron datos para actualizar.', ['status' => 400]); }
     return rest_ensure_response(['success' => true, 'updated' => $updated]);
+}
+
+function erbl_api_push_register( $request ) {
+    global $wpdb;
+    $uid      = get_current_user_id();
+    $token    = sanitize_text_field( $request->get_param('token') );
+    $platform = sanitize_text_field( $request->get_param('platform') ?? 'unknown' );
+
+    // Acepta tokens Expo (ExponentPushToken[xxx]) o raw device tokens
+    if ( ! preg_match('/^ExponentPushToken\[.+\]$/', $token) && strlen($token) < 20 ) {
+        return new WP_Error('invalid_token', 'Token de push inválido.', ['status' => 400]);
+    }
+
+    $t        = $wpdb->prefix . 'erbl_push_tokens';
+    $existing = $wpdb->get_var( $wpdb->prepare("SELECT id FROM $t WHERE token=%s", $token) );
+    $now      = current_time('mysql');
+
+    if ( $existing ) {
+        $wpdb->update( $t, [ 'user_id' => $uid, 'platform' => $platform, 'updated_at' => $now ], [ 'id' => intval($existing) ] );
+    } else {
+        $wpdb->insert( $t, [ 'user_id' => $uid, 'token' => $token, 'platform' => $platform, 'created_at' => $now, 'updated_at' => $now ] );
+    }
+
+    return rest_ensure_response( ['success' => true] );
+}
+
+function erbl_api_push_unregister( $request ) {
+    global $wpdb;
+    $uid   = get_current_user_id();
+    $token = sanitize_text_field( $request->get_param('token') );
+    $wpdb->delete( $wpdb->prefix . 'erbl_push_tokens', [ 'user_id' => $uid, 'token' => $token ] );
+    return rest_ensure_response( ['success' => true] );
+}
+
+function erbl_api_push_send_admin( $request ) {
+    $title   = sanitize_text_field( $request->get_param('title') );
+    $body    = sanitize_textarea_field( $request->get_param('body') );
+    $user_id = absint( $request->get_param('user_id') );
+
+    $result = $user_id > 0
+        ? erbl_send_push( [$user_id], $title, $body )
+        : erbl_send_push_broadcast( $title, $body );
+
+    return rest_ensure_response( array_merge( ['success' => true], $result ) );
+}
+
+function erbl_api_carousel() {
+    $slides = get_option( 'erbl_carousel_slides', [] );
+    if ( ! is_array( $slides ) ) $slides = [];
+    $active = array_values( array_filter( $slides, fn( $s ) => ! empty( $s['active'] ) ) );
+    foreach ( $active as &$s ) {
+        if ( ! empty( $s['image_id'] ) ) {
+            $url = wp_get_attachment_image_url( $s['image_id'], 'large' );
+            if ( $url ) $s['image_url'] = $url;
+        }
+        unset( $s['image_id'] ); // no need to expose internal ID
+    }
+    return rest_ensure_response( $active );
+}
+
+function erbl_api_orders( $request ) {
+    global $wpdb;
+    $user_id  = get_current_user_id();
+    $page     = $request->get_param('page');
+    $per_page = $request->get_param('per_page');
+    $t_tx     = $wpdb->prefix . 'erbl_transactions';
+
+    $orders = wc_get_orders( [
+        'customer_id' => $user_id,
+        'limit'       => $per_page,
+        'page'        => $page,
+        'orderby'     => 'date',
+        'order'       => 'DESC',
+    ] );
+
+    $data = [];
+    foreach ( $orders as $order ) {
+        $order_id = $order->get_id();
+
+        $line_items = [];
+        foreach ( $order->get_items() as $item ) {
+            $product = $item->get_product();
+            $images  = [];
+            if ( $product ) {
+                $img_id = $product->get_image_id();
+                if ( $img_id ) {
+                    $images[] = [
+                        'src'       => wp_get_attachment_url( $img_id ),
+                        'thumbnail' => wp_get_attachment_image_url( $img_id, 'thumbnail' ),
+                    ];
+                }
+            }
+            $line_items[] = [
+                'id'       => $item->get_id(),
+                'name'     => $item->get_name(),
+                'quantity' => $item->get_quantity(),
+                'total'    => $item->get_total(),
+                'images'   => $images,
+            ];
+        }
+
+        // Points earned and redeemed for this order
+        $points_earned   = (int) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COALESCE(SUM(delta),0) FROM $t_tx WHERE user_id=%d AND ref_id=%d AND type='order'",
+            $user_id, $order_id
+        ) );
+        $points_redeemed = (int) abs( (float) $wpdb->get_var( $wpdb->prepare(
+            "SELECT COALESCE(SUM(delta),0) FROM $t_tx WHERE user_id=%d AND ref_id=%d AND type='redemption'",
+            $user_id, $order_id
+        ) ) );
+
+        // Coupons applied
+        $coupons = [];
+        foreach ( $order->get_coupon_codes() as $code ) {
+            $coupons[] = $code;
+        }
+
+        $data[] = [
+            'id'                   => $order_id,
+            'number'               => $order->get_order_number(),
+            'status'               => $order->get_status(),
+            'date_created'         => $order->get_date_created()?->format( 'c' ),
+            'total'                => $order->get_total(),
+            'subtotal'             => $order->get_subtotal(),
+            'discount_total'       => $order->get_discount_total(),
+            'currency'             => $order->get_currency(),
+            'payment_method_title' => $order->get_payment_method_title(),
+            'points_earned'        => $points_earned,
+            'points_redeemed'      => $points_redeemed,
+            'coupons'              => $coupons,
+            'line_items'           => $line_items,
+            'billing'              => [
+                'first_name' => $order->get_billing_first_name(),
+                'last_name'  => $order->get_billing_last_name(),
+                'email'      => $order->get_billing_email(),
+            ],
+        ];
+    }
+
+    return rest_ensure_response( $data );
+}
+
+function erbl_api_register( $request ) {
+    $email      = $request->get_param('email');
+    $password   = $request->get_param('password');
+    $first_name = $request->get_param('first_name');
+    $last_name  = $request->get_param('last_name');
+    $birthday   = $request->get_param('birthday');
+
+    if ( email_exists( $email ) ) {
+        return new WP_Error( 'email_exists', 'Este email ya está registrado.', [ 'status' => 409 ] );
+    }
+
+    $base = sanitize_user( current( explode( '@', $email ) ), true );
+    $username = $base;
+    $i = 1;
+    while ( username_exists( $username ) ) { $username = $base . $i++; }
+
+    $user_id = wp_create_user( $username, $password, $email );
+    if ( is_wp_error( $user_id ) ) {
+        return new WP_Error( 'register_failed', $user_id->get_error_message(), [ 'status' => 500 ] );
+    }
+
+    wp_update_user( [ 'ID' => $user_id, 'first_name' => $first_name, 'last_name' => $last_name,
+        'display_name' => trim( "$first_name $last_name" ) ] );
+
+    if ( $birthday ) update_user_meta( $user_id, 'erbl_birthday', $birthday );
+
+    do_action( 'erbl_user_registered', $user_id );
+
+    // Crear Application Password para autenticar la app sin cookie
+    $app_pass_data = WP_Application_Passwords::create_new_application_password( $user_id, [ 'name' => 'El Rancho App' ] );
+    if ( is_wp_error( $app_pass_data ) ) {
+        return new WP_Error( 'app_pass_failed', 'Usuario creado pero no se pudo generar la contraseña de aplicación.', [ 'status' => 500 ] );
+    }
+
+    return rest_ensure_response( [
+        'success'      => true,
+        'user_id'      => $user_id,
+        'username'     => $username,
+        'app_password' => $app_pass_data[0], // Solo disponible en creación
+    ] );
 }
 
 function erbl_api_create_staff_user( $request ) {
@@ -2001,6 +2751,263 @@ function erbl_account_mis_puntos_page() {
             </div>
         </div>
 
+        <?php
+        $redeem_enabled = ( $settings['redeem_enabled'] ?? 'no' ) === 'yes';
+        $redeem_min     = intval( $settings['redeem_minimum'] ?? 0 );
+        $redeem_step    = max( 1, intval( $settings['redeem_step'] ?? 100 ) );
+        $redeem_max     = (int) floor( $points / $redeem_step ) * $redeem_step;
+        $redeem_slider_min = (int) ceil( max($redeem_min, $redeem_step) / $redeem_step ) * $redeem_step;
+        $can_redeem     = $redeem_enabled && $points >= $redeem_slider_min;
+        ?>
+        <div style="background:#fff;border:1px solid #e0d8cf;border-radius:10px;padding:16px 20px;margin-bottom:24px;">
+            <h3 style="font-size:15px;font-weight:600;margin:0 0 4px;color:#4A3B32;">🏪 Redimir en tienda física</h3>
+            <p style="font-size:12px;color:#7D6B60;margin:0 0 16px;">Genera un código QR y preséntalo al cajero. Caduca en 30 minutos.</p>
+            <?php if ( ! $redeem_enabled ) : ?>
+                <p style="font-size:13px;color:#7D6B60;background:#f8f2ec;border-radius:8px;padding:12px;">La redención en tienda no está habilitada aún.</p>
+            <?php elseif ( ! $can_redeem ) : ?>
+                <p style="font-size:13px;color:#7D6B60;background:#f8f2ec;border-radius:8px;padding:12px;">
+                    Necesitas al menos <strong><?php echo number_format( max($redeem_min, $redeem_step) ); ?> puntos</strong> para generar un código.
+                    Te faltan <strong><?php echo number_format( max($redeem_min, $redeem_step) - $points ); ?></strong>.
+                </p>
+            <?php else : ?>
+            <div id="erbl-redeem-form" style="display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;">
+                <label style="flex:1;min-width:160px;font-size:13px;color:#4A3B32;">
+                    Puntos a redimir
+                    <div style="display:flex;align-items:center;gap:10px;margin-top:6px;">
+                        <input type="range" id="erbl-pts-slider"
+                            min="<?php echo $redeem_slider_min; ?>"
+                            max="<?php echo $redeem_max; ?>"
+                            step="<?php echo $redeem_step; ?>"
+                            value="<?php echo $redeem_slider_min; ?>"
+                            style="flex:1;accent-color:#b81417;">
+                        <span id="erbl-pts-val" style="font-weight:700;color:#b81417;min-width:40px;text-align:right;"><?php echo $redeem_slider_min; ?></span>
+                    </div>
+                    <div style="font-size:11px;color:#7D6B60;margin-top:4px;">≈ $<span id="erbl-usd-val"><?php echo number_format($redeem_slider_min * $pv, 2); ?></span> USD</div>
+                </label>
+                <button id="erbl-gen-qr-btn" onclick="erblGenQR()"
+                    style="background:#b81417;color:#fff;border:none;border-radius:8px;padding:10px 20px;font-size:14px;font-weight:600;cursor:pointer;white-space:nowrap;">
+                    Generar QR
+                </button>
+            </div>
+            <div id="erbl-qr-result" style="display:none;margin-top:20px;text-align:center;">
+                <div id="erbl-qr-canvas" style="display:inline-block;padding:12px;background:#fff;border:2px solid #e8d5b0;border-radius:12px;"></div>
+                <p style="font-size:11px;color:#7D6B60;margin:10px 0 4px;">Código manual:</p>
+                <code id="erbl-qr-token" style="font-size:13px;letter-spacing:.04em;user-select:all;"></code>
+                <p id="erbl-qr-expiry" style="font-size:11px;color:#7D6B60;margin:8px 0 0;"></p>
+                <button onclick="erblResetQR()" style="margin-top:12px;background:none;border:1px solid #e0d8cf;border-radius:6px;padding:6px 14px;font-size:12px;color:#7D6B60;cursor:pointer;">← Generar otro</button>
+            </div>
+            <script>
+            (function(){
+                var slider = document.getElementById('erbl-pts-slider');
+                var ptsVal = document.getElementById('erbl-pts-val');
+                var usdVal = document.getElementById('erbl-usd-val');
+                var pv     = <?php echo $pv; ?>;
+                var nonce  = '<?php echo wp_create_nonce('wp_rest'); ?>';
+                var api    = '<?php echo esc_js(rest_url('erbl/v1')); ?>';
+                slider.addEventListener('input', function() {
+                    ptsVal.textContent = this.value;
+                    usdVal.textContent = (parseFloat(this.value) * pv).toFixed(2);
+                });
+                window.erblGenQR = function() {
+                    var btn = document.getElementById('erbl-gen-qr-btn');
+                    btn.disabled = true; btn.textContent = 'Generando...';
+                    fetch(api + '/redeem-token', {
+                        method: 'POST',
+                        headers: {'Content-Type':'application/json','X-WP-Nonce':nonce},
+                        body: JSON.stringify({points: parseInt(slider.value)})
+                    })
+                    .then(function(r){ return r.json(); })
+                    .then(function(data) {
+                        btn.disabled = false; btn.textContent = 'Generar QR';
+                        if (!data.token) { alert(data.message || 'Error al generar código.'); return; }
+                        document.getElementById('erbl-redeem-form').style.display = 'none';
+                        document.getElementById('erbl-qr-result').style.display   = '';
+                        document.getElementById('erbl-qr-token').textContent = data.token;
+                        document.getElementById('erbl-qr-expiry').textContent = '⏱ Válido 30 min · ' + data.points + ' pts · $' + data.value_usd + ' USD';
+                        var canvas = document.getElementById('erbl-qr-canvas');
+                        canvas.innerHTML = '';
+                        new QRCode(canvas, {text: data.qr_data, width:200, height:200, colorDark:'#4A3B32', colorLight:'#ffffff', correctLevel: QRCode.CorrectLevel.M});
+                    })
+                    .catch(function(){ btn.disabled=false; btn.textContent='Generar QR'; alert('Error de conexión.'); });
+                };
+                window.erblResetQR = function() {
+                    document.getElementById('erbl-redeem-form').style.display = '';
+                    document.getElementById('erbl-qr-result').style.display   = 'none';
+                    document.getElementById('erbl-qr-canvas').innerHTML = '';
+                };
+            })();
+            </script>
+            <?php endif; ?>
+        </div>
+
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+        <?php // ── Mis cupones (admin-gifted) ───────────────── ?>
+        <div class="erbl-card" style="background:#fff;border:1px solid #e8d5b0;border-radius:14px;padding:20px;margin-bottom:16px;">
+            <h3 style="font-size:15px;font-weight:600;margin:0 0 4px;color:#4A3B32;">🎟️ Mis cupones</h3>
+            <p style="font-size:12px;color:#7D6B60;margin:0 0 14px;">Cupones de regalo asignados por el equipo de El Rancho.</p>
+            <div id="erbl-arc-list"><p style="font-size:13px;color:#aaa;text-align:center;padding:8px 0;">Cargando...</p></div>
+            <div id="erbl-arc-qr-result" style="display:none;margin-top:16px;text-align:center;">
+                <p style="font-size:13px;font-weight:600;color:#4A3B32;margin-bottom:12px;">QR para: <span id="erbl-arc-name"></span></p>
+                <div id="erbl-arc-qr-canvas" style="display:inline-block;padding:12px;background:#fff;border:2px solid #e8d5b0;border-radius:12px;"></div>
+                <p style="font-size:11px;color:#7D6B60;margin:10px 0 4px;">Código manual:</p>
+                <code id="erbl-arc-token" style="font-size:13px;letter-spacing:.04em;user-select:all;"></code>
+                <p style="font-size:11px;color:#7D6B60;margin:8px 0 0;">⏱ Válido 30 minutos</p>
+                <button onclick="erblCloseArcQR()" style="margin-top:12px;background:none;border:1px solid #e0d8cf;border-radius:6px;padding:6px 14px;font-size:12px;color:#7D6B60;cursor:pointer;">← Volver a mis cupones</button>
+            </div>
+            <script>
+            (function(){
+                var api   = '<?php echo esc_js(rest_url('erbl/v1')); ?>';
+                var nonce = '<?php echo wp_create_nonce('wp_rest'); ?>';
+                function renderArc(coupons) {
+                    var list = document.getElementById('erbl-arc-list');
+                    if (!coupons.length) {
+                        list.innerHTML = '<p style="font-size:13px;color:#aaa;text-align:center;padding:8px 0;">Sin cupones pendientes.</p>';
+                        return;
+                    }
+                    list.innerHTML = '';
+                    coupons.forEach(function(c) {
+                        var row = document.createElement('div');
+                        row.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #f0e8de;';
+                        var info = document.createElement('div');
+                        info.style.flex = '1';
+                        var name = document.createElement('div');
+                        name.style.cssText = 'font-size:14px;font-weight:600;color:#4A3B32;';
+                        name.textContent = c.reward_name;
+                        info.appendChild(name);
+                        if (c.note) {
+                            var note = document.createElement('div');
+                            note.style.cssText = 'font-size:12px;color:#7D6B60;margin-top:2px;';
+                            note.textContent = c.note;
+                            info.appendChild(note);
+                        }
+                        if (c.expires_at) {
+                            var exp = document.createElement('div');
+                            exp.style.cssText = 'font-size:11px;color:#c0392b;margin-top:2px;';
+                            exp.textContent = 'Vence: ' + new Date(c.expires_at).toLocaleDateString('es-MX');
+                            info.appendChild(exp);
+                        }
+                        var btn = document.createElement('button');
+                        btn.style.cssText = 'background:#b81417;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;';
+                        btn.textContent = 'Generar QR';
+                        btn.dataset.id   = c.id;
+                        btn.dataset.name = c.reward_name;
+                        btn.addEventListener('click', function() { erblGenArcQR(this.dataset.id, this.dataset.name); });
+                        row.appendChild(info);
+                        row.appendChild(btn);
+                        list.appendChild(row);
+                    });
+                }
+                fetch(api + '/assigned-rewards', {headers: {'X-WP-Nonce': nonce}})
+                    .then(function(r){ return r.json(); })
+                    .then(renderArc)
+                    .catch(function(){ document.getElementById('erbl-arc-list').innerHTML = ''; });
+                window.erblGenArcQR = function(id, name) {
+                    fetch(api + '/assigned-rewards/' + id + '/token', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json', 'X-WP-Nonce': nonce}
+                    })
+                    .then(function(r){ return r.json(); })
+                    .then(function(data){
+                        if (!data.token) { alert(data.message || 'Error'); return; }
+                        document.getElementById('erbl-arc-list').style.display = 'none';
+                        document.getElementById('erbl-arc-qr-result').style.display = '';
+                        document.getElementById('erbl-arc-name').textContent  = data.reward_name;
+                        document.getElementById('erbl-arc-token').textContent = data.token;
+                        var canvas = document.getElementById('erbl-arc-qr-canvas');
+                        canvas.innerHTML = '';
+                        new QRCode(canvas, {text: data.qr_data, width: 200, height: 200, colorDark: '#4A3B32', colorLight: '#ffffff', correctLevel: QRCode.CorrectLevel.M});
+                    })
+                    .catch(function(){ alert('Error de conexión.'); });
+                };
+                window.erblCloseArcQR = function() {
+                    document.getElementById('erbl-arc-qr-result').style.display = 'none';
+                    document.getElementById('erbl-arc-list').style.display = '';
+                    document.getElementById('erbl-arc-qr-canvas').innerHTML = '';
+                };
+            })();
+            </script>
+        </div>
+        <?php // ── Catálogo de recompensas ────────────────── ?>
+        <div style="background:#fff;border:1px solid #e0d8cf;border-radius:10px;padding:16px 20px;margin-bottom:24px;">
+            <h3 style="font-size:15px;font-weight:600;margin:0 0 4px;color:#4A3B32;">🎁 Canjear por artículos</h3>
+            <p style="font-size:12px;color:#7D6B60;margin:0 0 14px;">Genera un QR y el cajero te entrega el artículo directamente.</p>
+            <div id="erbl-rewards-list">
+                <p style="font-size:13px;color:#aaa;text-align:center;padding:8px 0;">Cargando...</p>
+            </div>
+            <!-- QR result para recompensas -->
+            <div id="erbl-rwd-qr-result" style="display:none;margin-top:16px;text-align:center;">
+                <p style="font-size:13px;font-weight:600;color:#4A3B32;margin-bottom:12px;">QR generado para: <span id="erbl-rwd-name"></span></p>
+                <div id="erbl-rwd-qr-canvas" style="display:inline-block;padding:12px;background:#fff;border:2px solid #e8d5b0;border-radius:12px;"></div>
+                <p style="font-size:11px;color:#7D6B60;margin:10px 0 4px;">Código manual:</p>
+                <code id="erbl-rwd-token" style="font-size:13px;letter-spacing:.04em;user-select:all;"></code>
+                <p style="font-size:11px;color:#7D6B60;margin:8px 0 0;">⏱ Válido 30 minutos</p>
+                <button onclick="erblCloseRwdQR()" style="margin-top:12px;background:none;border:1px solid #e0d8cf;border-radius:6px;padding:6px 14px;font-size:12px;color:#7D6B60;cursor:pointer;">← Volver al catálogo</button>
+            </div>
+        </div>
+        <script>
+        (function(){
+            var api      = '<?php echo esc_js(rest_url('erbl/v1')); ?>';
+            var nonce    = '<?php echo wp_create_nonce('wp_rest'); ?>';
+            var points   = <?php echo intval($points); ?>;
+
+            function renderRewards(rewards) {
+                var list = document.getElementById('erbl-rewards-list');
+                if (!rewards.length) {
+                    list.innerHTML = '<p style="font-size:13px;color:#aaa;text-align:center;padding:8px 0;">Sin recompensas disponibles aún.</p>';
+                    return;
+                }
+                var html = '';
+                rewards.forEach(function(r) {
+                    var can = r.affordable;
+                    html += '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #f0e8de;">'
+                        + '<div style="flex:1;">'
+                        + '<div style="font-size:14px;font-weight:600;color:' + (can?'#4A3B32':'#aaa') + ';">' + r.name + '</div>'
+                        + (r.description ? '<div style="font-size:12px;color:#7D6B60;margin-top:2px;">' + r.description + '</div>' : '')
+                        + '<div style="font-size:12px;color:#b81417;font-weight:600;margin-top:4px;">' + r.points_cost.toLocaleString() + ' pts</div>'
+                        + '</div>'
+                        + '<button onclick="erblRedeemReward(' + r.id + ',\'' + r.name.replace(/'/g,"\\'") + '\')" '
+                        + (can ? 'style="background:#b81417;color:#fff;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;"'
+                               : 'disabled style="background:#e0d8cf;color:#aaa;border:none;border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;cursor:not-allowed;white-space:nowrap;"')
+                        + '>' + (can ? 'Canjear' : 'Sin pts') + '</button>'
+                        + '</div>';
+                });
+                list.innerHTML = html;
+            }
+
+            fetch(api + '/rewards', {headers:{'X-WP-Nonce':nonce}})
+                .then(function(r){return r.json();})
+                .then(renderRewards)
+                .catch(function(){ document.getElementById('erbl-rewards-list').innerHTML=''; });
+
+            window.erblRedeemReward = function(id, name) {
+                var btn = event.target;
+                btn.disabled = true; btn.textContent = '...';
+                fetch(api + '/rewards/' + id + '/redeem', {
+                    method:'POST', headers:{'Content-Type':'application/json','X-WP-Nonce':nonce}
+                })
+                .then(function(r){return r.json();})
+                .then(function(data){
+                    btn.disabled = false; btn.textContent = 'Canjear';
+                    if (!data.token) { alert(data.message||'Error'); return; }
+                    document.getElementById('erbl-rewards-list').style.display = 'none';
+                    document.getElementById('erbl-rwd-qr-result').style.display = '';
+                    document.getElementById('erbl-rwd-name').textContent = data.reward_name;
+                    document.getElementById('erbl-rwd-token').textContent = data.token;
+                    var canvas = document.getElementById('erbl-rwd-qr-canvas');
+                    canvas.innerHTML = '';
+                    new QRCode(canvas, {text:data.qr_data, width:200, height:200, colorDark:'#4A3B32', colorLight:'#ffffff', correctLevel:QRCode.CorrectLevel.M});
+                })
+                .catch(function(){ btn.disabled=false; btn.textContent='Canjear'; alert('Error de conexión.'); });
+            };
+
+            window.erblCloseRwdQR = function() {
+                document.getElementById('erbl-rwd-qr-result').style.display = 'none';
+                document.getElementById('erbl-rewards-list').style.display = '';
+                document.getElementById('erbl-rwd-qr-canvas').innerHTML = '';
+            };
+        })();
+        </script>
+
         <?php if ( $t_spend > 0 ) : ?>
         <div style="background:#fff;border:1px solid #e0d8cf;border-radius:10px;padding:16px 20px;margin-bottom:24px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
@@ -2063,29 +3070,26 @@ function erbl_account_mis_puntos_page() {
             </div>
 
             <?php if ($txs) : ?>
-            <table style="width:100%;border-collapse:collapse;font-size:13px;">
-                <thead><tr style="border-bottom:2px solid #f0e8de;">
-                    <th style="text-align:left;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Movimiento</th>
-                    <th style="text-align:left;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Detalle</th>
-                    <th style="text-align:right;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Puntos</th>
-                    <th style="text-align:right;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Balance</th>
-                    <th style="text-align:right;padding:8px 6px;color:#7D6B60;font-weight:600;font-size:12px;">Fecha</th>
-                </tr></thead>
-                <tbody>
+            <div>
                 <?php foreach ($txs as $tx) :
                     $pos   = intval($tx->delta) > 0;
                     $color = $pos ? '#0a7c42' : '#c0392b';
                     $sign  = $pos ? '+' : ''; ?>
-                    <tr style="border-bottom:1px solid #f9f4ef;">
-                        <td style="padding:10px 6px;color:#4A3B32;font-weight:500;"><?php echo esc_html($tx_labels[$tx->type] ?? ucfirst($tx->type)); ?></td>
-                        <td style="padding:10px 6px;color:#7D6B60;font-size:12px;"><?php echo esc_html($tx->note ?: '—'); ?></td>
-                        <td style="padding:10px 6px;text-align:right;font-weight:700;color:<?php echo esc_attr($color); ?>;"><?php echo esc_html($sign.number_format($tx->delta)); ?></td>
-                        <td style="padding:10px 6px;text-align:right;color:#4A3B32;"><?php echo number_format($tx->balance); ?></td>
-                        <td style="padding:10px 6px;text-align:right;color:#7D6B60;font-size:12px;white-space:nowrap;"><?php echo esc_html(date_i18n('d M Y', strtotime($tx->created_at))); ?></td>
-                    </tr>
+                    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 0;border-bottom:1px solid #f0e8de;">
+                        <div style="flex:1;min-width:0;">
+                            <div style="font-size:13px;font-weight:600;color:#4A3B32;"><?php echo esc_html($tx_labels[$tx->type] ?? ucfirst($tx->type)); ?></div>
+                            <?php if ($tx->note) : ?>
+                            <div style="font-size:12px;color:#7D6B60;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"><?php echo esc_html($tx->note); ?></div>
+                            <?php endif; ?>
+                            <div style="font-size:11px;color:#aaa;margin-top:2px;"><?php echo esc_html(date_i18n('d M Y', strtotime($tx->created_at))); ?></div>
+                        </div>
+                        <div style="text-align:right;flex-shrink:0;">
+                            <div style="font-size:15px;font-weight:700;color:<?php echo esc_attr($color); ?>;"><?php echo esc_html($sign.number_format($tx->delta)); ?> pts</div>
+                            <div style="font-size:11px;color:#7D6B60;margin-top:2px;">Balance: <?php echo number_format($tx->balance); ?></div>
+                        </div>
+                    </div>
                 <?php endforeach; ?>
-                </tbody>
-            </table>
+            </div>
             <?php if ($pages > 1) : ?>
             <div style="display:flex;justify-content:center;gap:6px;margin-top:16px;flex-wrap:wrap;">
                 <?php for ($i=1; $i<=$pages; $i++) :
@@ -2121,6 +3125,11 @@ function erbl_account_mis_puntos_page() {
 /* --------------------------------------------------
    18. ADMIN — Tab "Transacciones" con filtros
    -------------------------------------------------- */
+add_action( 'admin_enqueue_scripts', function( $hook ) {
+    if ( $hook !== 'woocommerce_page_elrancho-loyalty' ) return;
+    wp_enqueue_media();
+} );
+
 add_action( 'admin_menu', function() {
     if ( ! current_user_can( 'manage_woocommerce' ) ) { return; }
     add_submenu_page( 'woocommerce', 'Rancho Rewards', 'Rancho Rewards', 'manage_woocommerce', 'elrancho-loyalty', 'erbl_admin_page_full' );
@@ -2137,7 +3146,7 @@ function erbl_admin_page_full() {
     $members     = (int)$wpdb->get_var("SELECT COUNT(DISTINCT user_id) FROM $t_tx");
     $pts_month   = (int)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(delta),0) FROM $t_tx WHERE delta>0 AND created_at>=%s", date('Y-m-01')));
     $red_month   = (int)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(ABS(delta)),0) FROM $t_tx WHERE type='redemption' AND created_at>=%s", date('Y-m-01')));
-    $tabs_nav = ['dashboard'=>'Dashboard','transactions'=>'Transacciones','settings'=>'Configuración','tiers'=>'Tiers','challenges'=>'Retos','members'=>'Miembros'];
+    $tabs_nav = ['dashboard'=>'Dashboard','transactions'=>'Transacciones','settings'=>'Configuración','tiers'=>'Tiers','challenges'=>'Retos','rewards'=>'Recompensas','members'=>'Miembros','carousel'=>'Carrusel App','notifications'=>'🔔 Notificaciones'];
     ?>
     <div class="wrap">
     <h1 style="display:flex;align-items:center;gap:8px;"><span style="font-size:22px;">🥐</span> Rancho Rewards</h1>
@@ -2206,6 +3215,46 @@ function erbl_admin_page_full() {
             });
         });
         </script>
+
+        <?php
+        // ── Token de prueba ─────────────────────────────────────────────
+        $test_token_msg = '';
+        if ( isset($_POST['erbl_gen_test_token']) && check_admin_referer('erbl_gen_test_token') ) {
+            $test_uid = intval($_POST['test_uid'] ?? 0);
+            $test_pts = max(1, intval($_POST['test_pts'] ?? 100));
+            if ( $test_uid > 0 && get_userdata($test_uid) ) {
+                $tok = wp_generate_password(24, false);
+                set_transient( 'erbl_redeem_' . $tok, [ 'user_id' => $test_uid, 'points' => $test_pts ], 30 * MINUTE_IN_SECONDS );
+                $test_token_msg = $tok;
+            }
+        }
+        $all_members = get_users(['role__in' => ['customer','administrator','shop_manager'], 'number' => 200, 'fields' => ['ID','display_name','user_email']]);
+        ?>
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;margin-top:20px;">
+            <h3 style="margin-top:0;">🧪 Generar token de prueba (staff)</h3>
+            <p style="color:#646970;font-size:13px;">Crea un token de redención temporal (30 min) para probar la página de cajero sin necesitar la app.</p>
+            <form method="post" style="display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;">
+                <?php wp_nonce_field('erbl_gen_test_token'); ?>
+                <label style="font-size:13px;">Usuario<br>
+                    <select name="test_uid" style="margin-top:4px;">
+                        <?php foreach ($all_members as $m) : ?>
+                            <option value="<?php echo $m->ID; ?>"><?php echo esc_html($m->display_name . ' (' . $m->user_email . ')'); ?></option>
+                        <?php endforeach; ?>
+                    </select>
+                </label>
+                <label style="font-size:13px;">Puntos a redimir<br>
+                    <input type="number" name="test_pts" value="100" min="1" style="margin-top:4px;width:90px;">
+                </label>
+                <button type="submit" name="erbl_gen_test_token" class="button button-primary">Generar token</button>
+            </form>
+            <?php if ($test_token_msg) : ?>
+            <div style="margin-top:16px;background:#f0f6fc;border:1px solid #72aee6;border-radius:6px;padding:14px;">
+                <p style="margin:0 0 6px;font-size:13px;font-weight:600;">Token generado (válido 30 min):</p>
+                <code style="font-size:15px;letter-spacing:.05em;user-select:all;"><?php echo esc_html($test_token_msg); ?></code>
+                <p style="margin:10px 0 0;font-size:12px;color:#646970;">Pégalo en la entrada manual de la página staff o úsalo en el QR scanner.</p>
+            </div>
+            <?php endif; ?>
+        </div>
 
     <?php elseif ($tab === 'transactions'):
         $csv_url = wp_nonce_url(add_query_arg(array_filter(['erbl_export_csv'=>1,'uid'=>$_GET['uid']??'','tipo'=>$_GET['tipo']??'','desde'=>$_GET['desde']??'','hasta'=>$_GET['hasta']??'']), admin_url('admin.php?page=elrancho-loyalty&tab=transactions')), 'erbl_export_csv');
@@ -2336,6 +3385,28 @@ function erbl_admin_page_full() {
             <table class="form-table">
                 <tr><th>Bono de registro (pts)</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_registration]" value="<?php echo esc_attr($s['bonus_registration']);?>"></td></tr>
                 <tr><th>Multiplicador cumpleaños</th><td><input type="number" min="1" step="0.1" class="small-text" name="elrancho_loyalty_settings[bonus_birthday_mult]" value="<?php echo esc_attr($s['bonus_birthday_mult']);?>">x</td></tr>
+                <?php
+                $t_rw_opts = $wpdb->get_results("SELECT id, name FROM {$wpdb->prefix}erbl_rewards WHERE active=1 ORDER BY sort_order ASC, id ASC");
+                ?>
+                <tr>
+                    <th scope="row">Regalo de cumpleaños</th>
+                    <td>
+                        <select name="elrancho_loyalty_settings[birthday_reward_id]">
+                            <option value="0"<?php selected(0, intval($s['birthday_reward_id'])); ?>>— Sin regalo de catálogo —</option>
+                            <?php foreach ($t_rw_opts as $rwo): ?>
+                            <option value="<?php echo $rwo->id; ?>"<?php selected(intval($s['birthday_reward_id']), intval($rwo->id)); ?>><?php echo esc_html($rwo->name); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <p class="description">Artículo del catálogo que se asigna automáticamente en la semana de cumpleaños del cliente.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th scope="row">Regalo cumpleaños (personalizado)</th>
+                    <td>
+                        <input type="text" name="elrancho_loyalty_settings[birthday_reward_name]" value="<?php echo esc_attr($s['birthday_reward_name']); ?>" class="regular-text" placeholder="ej. Concha de cumpleaños">
+                        <p class="description">Nombre del artículo si no está en el catálogo. Se ignora si seleccionaste un artículo del catálogo arriba.</p>
+                    </td>
+                </tr>
                 <tr><th>Pts al referidor</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_referrer]" value="<?php echo esc_attr($s['bonus_referrer']);?>"></td></tr>
                 <tr><th>Pts al referido</th><td><input type="number" min="0" class="small-text" name="elrancho_loyalty_settings[bonus_referred]" value="<?php echo esc_attr($s['bonus_referred']);?>"></td></tr>
             </table>
@@ -2380,7 +3451,7 @@ function erbl_admin_page_full() {
     <?php elseif ($tab === 'challenges'):
         $t_ch=$wpdb->prefix.'erbl_challenges';
         if (isset($_POST['erbl_save_challenge'])&&wp_verify_nonce($_POST['_wpnonce']??'','erbl_challenges')):
-            $wpdb->insert($t_ch,['title'=>sanitize_text_field($_POST['ch_title']??''),'description'=>sanitize_textarea_field($_POST['ch_desc']??''),'type'=>sanitize_key($_POST['ch_type']??'orders_count'),'target'=>max(1,intval($_POST['ch_target']??1)),'bonus_pts'=>max(0,intval($_POST['ch_pts']??0)),'tier_req'=>sanitize_key($_POST['ch_tier']??'bronze'),'active'=>1,'created_at'=>current_time('mysql')]);
+            $wpdb->insert($t_ch,['title'=>sanitize_text_field($_POST['ch_title']??''),'description'=>sanitize_textarea_field($_POST['ch_desc']??''),'type'=>sanitize_key($_POST['ch_type']??'orders_count'),'target'=>max(1,intval($_POST['ch_target']??1)),'bonus_pts'=>max(0,intval($_POST['ch_pts']??0)),'reward_id'=>max(0,intval($_POST['ch_reward_id']??0)),'tier_req'=>sanitize_key($_POST['ch_tier']??'bronze'),'active'=>1,'created_at'=>current_time('mysql')]);
             echo '<div class="notice notice-success"><p>Reto creado.</p></div>';
         endif;
         if (isset($_GET['toggle_ch'])&&wp_verify_nonce($_GET['_wpnonce']??'','erbl_toggle_ch')):
@@ -2388,9 +3459,17 @@ function erbl_admin_page_full() {
             $wpdb->update($t_ch,['active'=>(int)!$wpdb->get_var($wpdb->prepare("SELECT active FROM $t_ch WHERE id=%d",$cid))],['id'=>$cid]);
         endif;
         $challenges=$wpdb->get_results("SELECT * FROM $t_ch ORDER BY id DESC");?>
-        <table class="widefat striped"><thead><tr><th>Título</th><th>Tipo</th><th>Meta</th><th>Bonus</th><th>Tier</th><th>Estado</th><th>Acción</th></tr></thead><tbody>
+        <table class="widefat striped"><thead><tr><th>Título</th><th>Tipo</th><th>Meta</th><th>Bonus</th><th>Premio</th><th>Tier</th><th>Estado</th><th>Acción</th></tr></thead><tbody>
         <?php foreach($challenges as $ch):$tog=wp_nonce_url(admin_url('admin.php?page=elrancho-loyalty&tab=challenges&toggle_ch='.$ch->id),'erbl_toggle_ch');?>
-            <tr><td><strong><?php echo esc_html($ch->title);?></strong><br><span style="color:#888;font-size:12px;"><?php echo esc_html($ch->description);?></span></td><td><?php echo esc_html($ch->type);?></td><td><?php echo esc_html($ch->target);?></td><td><?php echo number_format($ch->bonus_pts);?> pts</td><td><?php echo esc_html(ucfirst($ch->tier_req));?></td><td><?php echo $ch->active?'<span style="color:#0a7c42;">Activo</span>':'<span style="color:#c0392b;">Inactivo</span>';?></td><td><a href="<?php echo esc_url($tog);?>"><?php echo $ch->active?'Pausar':'Activar';?></a></td></tr>
+            <tr><td><strong><?php echo esc_html($ch->title);?></strong><br><span style="color:#888;font-size:12px;"><?php echo esc_html($ch->description);?></span></td><td><?php echo esc_html($ch->type);?></td><td><?php echo esc_html($ch->target);?></td><td><?php echo number_format($ch->bonus_pts);?> pts</td><td style="font-size:12px;"><?php
+if (intval($ch->reward_id) > 0) {
+    $t_rw2 = $wpdb->prefix . 'erbl_rewards';
+    $rw_name = $wpdb->get_var($wpdb->prepare("SELECT name FROM $t_rw2 WHERE id=%d", $ch->reward_id));
+    echo $rw_name ? esc_html('🎟️ ' . $rw_name) : '—';
+} else {
+    echo '—';
+}
+?></td><td><?php echo esc_html(ucfirst($ch->tier_req));?></td><td><?php echo $ch->active?'<span style="color:#0a7c42;">Activo</span>':'<span style="color:#c0392b;">Inactivo</span>';?></td><td><a href="<?php echo esc_url($tog);?>"><?php echo $ch->active?'Pausar':'Activar';?></a></td></tr>
         <?php endforeach;?>
         </tbody></table>
         <h2 style="margin-top:24px;">Crear reto</h2>
@@ -2401,10 +3480,249 @@ function erbl_admin_page_full() {
                 <tr><th>Tipo</th><td><select name="ch_type"><option value="orders_count">N° de órdenes</option><option value="streak_weeks">Racha semanal</option><option value="single_order_min">Orden mínima ($)</option><option value="categories_month">Categorías distintas</option><option value="mondays_month">Lunes del mes</option></select></td></tr>
                 <tr><th>Meta</th><td><input type="number" name="ch_target" class="small-text" min="1" value="1"></td></tr>
                 <tr><th>Bonus (pts)</th><td><input type="number" name="ch_pts" class="small-text" min="0" value="100"></td></tr>
+                <tr>
+                    <th>Premio en producto <span style="font-weight:normal;color:#646970;">(opcional)</span></th>
+                    <td>
+                        <?php
+                        $t_rw_ch = $wpdb->prefix . 'erbl_rewards';
+                        $rw_opts = $wpdb->get_results("SELECT id, name FROM $t_rw_ch WHERE active=1 ORDER BY sort_order ASC, id ASC");
+                        ?>
+                        <select name="ch_reward_id">
+                            <option value="0">— Solo puntos (sin producto) —</option>
+                            <?php foreach ($rw_opts as $rwo): ?>
+                            <option value="<?php echo $rwo->id; ?>"><?php echo esc_html($rwo->name); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                        <p class="description">Si seleccionas un artículo, se asignará automáticamente al cliente al completar el reto.</p>
+                    </td>
+                </tr>
                 <tr><th>Tier requerido</th><td><select name="ch_tier"><option value="bronze">Bronce</option><option value="silver">Plata</option><option value="gold">Oro</option></select></td></tr>
             </table>
             <input type="submit" name="erbl_save_challenge" class="button button-primary" value="Crear reto">
         </form>
+
+    <?php elseif ($tab === 'rewards'):
+        $t_rw = $wpdb->prefix . 'erbl_rewards';
+
+        // Handle coupon assignment
+        if ( isset($_POST['erbl_assign_coupon']) && wp_verify_nonce($_POST['_wpnonce']??'', 'erbl_assign_coupon') ) {
+            $t_ar    = $wpdb->prefix . 'erbl_assigned_rewards';
+            $user_id = intval($_POST['ac_user_id'] ?? 0);
+            $rw_id   = intval($_POST['ac_reward_id'] ?? 0);
+            $rw_name = sanitize_text_field($_POST['ac_custom_name'] ?? '');
+            $note    = sanitize_text_field($_POST['ac_note'] ?? '');
+            $expires = sanitize_text_field($_POST['ac_expires'] ?? '');
+            // If a catalog reward was selected, use its name
+            if ( $rw_id ) {
+                $rw = $wpdb->get_row($wpdb->prepare("SELECT name FROM $t_rw WHERE id=%d", $rw_id));
+                if ($rw) $rw_name = $rw->name;
+            }
+            if ( $user_id && $rw_name ) {
+                $wpdb->insert($t_ar, [
+                    'user_id'     => $user_id,
+                    'reward_id'   => $rw_id,
+                    'reward_name' => $rw_name,
+                    'note'        => $note,
+                    'assigned_by' => get_current_user_id(),
+                    'assigned_at' => current_time('mysql'),
+                    'expires_at'  => $expires ? date('Y-m-d 23:59:59', strtotime($expires)) : null,
+                ]);
+                echo '<div class="notice notice-success is-dismissible"><p>Cupón asignado correctamente.</p></div>';
+            } else {
+                echo '<div class="notice notice-error is-dismissible"><p>Selecciona un cliente y especifica un artículo.</p></div>';
+            }
+        }
+
+        // Handle coupon deletion
+        if ( isset($_GET['del_ac']) && wp_verify_nonce($_GET['_wpnonce']??'', 'erbl_del_ac') ) {
+            $t_ar = $wpdb->prefix . 'erbl_assigned_rewards';
+            $wpdb->delete($t_ar, ['id' => (int)$_GET['del_ac'], 'redeemed_at' => null]);
+            echo '<div class="notice notice-success is-dismissible"><p>Cupón eliminado.</p></div>';
+        }
+
+        if ( isset($_POST['erbl_save_reward']) && wp_verify_nonce($_POST['_wpnonce']??'', 'erbl_rewards') ) {
+            $wpdb->insert($t_rw, [
+                'name'        => sanitize_text_field($_POST['rw_name'] ?? ''),
+                'description' => sanitize_text_field($_POST['rw_desc'] ?? ''),
+                'points_cost' => max(0, intval($_POST['rw_points'] ?? 0)),
+                'sort_order'  => max(0, intval($_POST['rw_order'] ?? 0)),
+                'active'      => 1,
+                'created_at'  => current_time('mysql'),
+            ]);
+            echo '<div class="notice notice-success is-dismissible"><p>Recompensa creada.</p></div>';
+        }
+        if ( isset($_GET['toggle_rw']) && wp_verify_nonce($_GET['_wpnonce']??'', 'erbl_toggle_rw') ) {
+            $rid = (int)$_GET['toggle_rw'];
+            $cur = (int)$wpdb->get_var($wpdb->prepare("SELECT active FROM $t_rw WHERE id=%d", $rid));
+            $wpdb->update($t_rw, ['active' => (int)!$cur], ['id' => $rid]);
+        }
+        if ( isset($_GET['del_rw']) && wp_verify_nonce($_GET['_wpnonce']??'', 'erbl_del_rw') ) {
+            $wpdb->delete($t_rw, ['id' => (int)$_GET['del_rw']]);
+            echo '<div class="notice notice-success is-dismissible"><p>Recompensa eliminada.</p></div>';
+        }
+
+        $rewards = $wpdb->get_results("SELECT * FROM $t_rw ORDER BY sort_order ASC, id DESC");
+        $base_rw = admin_url('admin.php?page=elrancho-loyalty&tab=rewards');
+        ?>
+        <h2>Catálogo de recompensas</h2>
+        <p style="color:#646970;">Artículos que los clientes pueden canjear por puntos en tienda. El cajero ve el nombre del artículo al escanear el QR.</p>
+        <?php if ($rewards) : ?>
+        <table class="widefat striped">
+            <thead><tr><th>Nombre</th><th>Descripción</th><th>Costo (pts)</th><th>Orden</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <tbody>
+            <?php foreach ($rewards as $rw) :
+                $tog_url = wp_nonce_url(add_query_arg(['toggle_rw' => $rw->id], $base_rw), 'erbl_toggle_rw');
+                $del_url = wp_nonce_url(add_query_arg(['del_rw'    => $rw->id], $base_rw), 'erbl_del_rw');
+            ?>
+                <tr>
+                    <td><strong><?php echo esc_html($rw->name); ?></strong></td>
+                    <td style="color:#646970;font-size:13px;"><?php echo esc_html($rw->description ?: '—'); ?></td>
+                    <td><?php echo number_format($rw->points_cost); ?> pts</td>
+                    <td><?php echo intval($rw->sort_order); ?></td>
+                    <td><?php echo $rw->active ? '<span style="color:#0a7c42;">Activa</span>' : '<span style="color:#c0392b;">Inactiva</span>'; ?></td>
+                    <td>
+                        <a href="<?php echo esc_url($tog_url); ?>"><?php echo $rw->active ? 'Pausar' : 'Activar'; ?></a>
+                        &nbsp;|&nbsp;
+                        <a href="<?php echo esc_url($del_url); ?>" onclick="return confirm('¿Eliminar esta recompensa?');" style="color:#c0392b;">Eliminar</a>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php else : ?>
+        <p style="color:#646970;">Sin recompensas aún. Crea la primera abajo.</p>
+        <?php endif; ?>
+
+        <h2 style="margin-top:24px;">Crear recompensa</h2>
+        <form method="post"><?php wp_nonce_field('erbl_rewards'); ?>
+            <table class="form-table">
+                <tr><th>Nombre del artículo</th><td><input type="text" name="rw_name" class="regular-text" placeholder="ej. Café de la casa" required></td></tr>
+                <tr><th>Descripción</th><td><input type="text" name="rw_desc" class="regular-text" placeholder="ej. 1 café de 12oz, cualquier preparación"></td></tr>
+                <tr><th>Costo en puntos</th><td><input type="number" name="rw_points" class="small-text" min="1" value="500" required></td></tr>
+                <tr><th>Orden de aparición</th><td><input type="number" name="rw_order" class="small-text" min="0" value="0"><p class="description">Menor número aparece primero.</p></td></tr>
+            </table>
+            <input type="submit" name="erbl_save_reward" class="button button-primary" value="Crear recompensa">
+        </form>
+
+        <hr style="margin:32px 0;">
+        <h2>Cupones asignados por admin</h2>
+        <p style="color:#646970;">Asigna cupones de artículos directamente a un cliente sin que gaste puntos (regalo, compensación, etc.).</p>
+
+        <?php
+        $t_ar = $wpdb->prefix . 'erbl_assigned_rewards';
+        $filter_status = sanitize_text_field($_GET['ac_status'] ?? 'pending');
+        $status_sql    = $filter_status === 'redeemed'
+            ? "WHERE ar.redeemed_at IS NOT NULL"
+            : ($filter_status === 'all' ? ""
+            : "WHERE ar.redeemed_at IS NULL");
+        $assigned_coupons = $wpdb->get_results(
+            "SELECT ar.*, u.display_name, u.user_email,
+                    (SELECT display_name FROM {$wpdb->users} WHERE ID=ar.assigned_by) as admin_name
+             FROM $t_ar ar
+             LEFT JOIN {$wpdb->users} u ON u.ID = ar.user_id
+             $status_sql
+             ORDER BY ar.id DESC LIMIT 50"
+        );
+        $filter_url = admin_url('admin.php?page=elrancho-loyalty&tab=rewards');
+        ?>
+        <div style="margin-bottom:16px;">
+            <a href="<?php echo esc_url(add_query_arg('ac_status','pending',$filter_url)); ?>" <?php echo $filter_status==='pending'?'style="font-weight:700;"':''; ?>>Pendientes</a> &nbsp;|&nbsp;
+            <a href="<?php echo esc_url(add_query_arg('ac_status','redeemed',$filter_url)); ?>" <?php echo $filter_status==='redeemed'?'style="font-weight:700;"':''; ?>>Canjeados</a> &nbsp;|&nbsp;
+            <a href="<?php echo esc_url(add_query_arg('ac_status','all',$filter_url)); ?>" <?php echo $filter_status==='all'?'style="font-weight:700;"':''; ?>>Todos</a>
+        </div>
+        <?php if ($assigned_coupons) : ?>
+        <table class="widefat striped">
+            <thead><tr><th>Cliente</th><th>Artículo</th><th>Nota</th><th>Asignado por</th><th>Fecha</th><th>Vence</th><th>Estado</th><th>Acciones</th></tr></thead>
+            <tbody>
+            <?php foreach ($assigned_coupons as $ac) :
+                $del_url = wp_nonce_url(add_query_arg(['del_ac' => $ac->id, 'ac_status' => $filter_status], $filter_url), 'erbl_del_ac');
+                $is_redeemed = !empty($ac->redeemed_at);
+                $is_expired  = $ac->expires_at && !$is_redeemed && strtotime($ac->expires_at) < time();
+            ?>
+            <tr>
+                <td><strong><?php echo esc_html($ac->display_name ?: '#'.$ac->user_id); ?></strong><br><span style="font-size:12px;color:#646970;"><?php echo esc_html($ac->user_email); ?></span></td>
+                <td><?php echo esc_html($ac->reward_name); ?></td>
+                <td style="color:#646970;font-size:12px;"><?php echo esc_html($ac->note ?: '—'); ?></td>
+                <td style="font-size:12px;"><?php echo esc_html($ac->admin_name ?: '#'.$ac->assigned_by); ?></td>
+                <td style="font-size:12px;"><?php echo esc_html(date_i18n('d M Y', strtotime($ac->assigned_at))); ?></td>
+                <td style="font-size:12px;"><?php echo $ac->expires_at ? esc_html(date_i18n('d M Y', strtotime($ac->expires_at))) : '—'; ?></td>
+                <td>
+                    <?php if ($is_redeemed) : ?>
+                        <span style="color:#646970;">Canjeado <?php echo esc_html(date_i18n('d M', strtotime($ac->redeemed_at))); ?></span>
+                    <?php elseif ($is_expired) : ?>
+                        <span style="color:#c0392b;">Expirado</span>
+                    <?php else : ?>
+                        <span style="color:#0a7c42;">Pendiente</span>
+                    <?php endif; ?>
+                </td>
+                <td>
+                    <?php if (!$is_redeemed) : ?>
+                        <a href="<?php echo esc_url($del_url); ?>" onclick="return confirm('¿Cancelar este cupón?');" style="color:#c0392b;">Cancelar</a>
+                    <?php else : ?>—<?php endif; ?>
+                </td>
+            </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php else : ?>
+        <p style="color:#646970;">Sin cupones <?php echo $filter_status === 'redeemed' ? 'canjeados' : 'asignados'; ?> aún.</p>
+        <?php endif; ?>
+
+        <h3 style="margin-top:24px;">Asignar cupón a cliente</h3>
+        <form method="post"><?php wp_nonce_field('erbl_assign_coupon'); ?>
+            <table class="form-table">
+                <tr>
+                    <th>Cliente</th>
+                    <td>
+                        <?php
+                        $customers = get_users(['role__in' => ['customer','subscriber','administrator'], 'number' => 200, 'orderby' => 'display_name']);
+                        ?>
+                        <select name="ac_user_id" required style="min-width:280px;">
+                            <option value="">— Selecciona cliente —</option>
+                            <?php foreach ($customers as $cu) : ?>
+                            <option value="<?php echo $cu->ID; ?>"><?php echo esc_html($cu->display_name . ' (' . $cu->user_email . ')'); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Artículo del catálogo</th>
+                    <td>
+                        <?php
+                        $all_rewards = $wpdb->get_results("SELECT id, name FROM $t_rw WHERE active=1 ORDER BY sort_order ASC, id ASC");
+                        ?>
+                        <select name="ac_reward_id" style="min-width:220px;" id="ac_reward_select" onchange="erblRewardSelect(this)">
+                            <option value="">— O escribe uno personalizado abajo —</option>
+                            <?php foreach ($all_rewards as $rw) : ?>
+                            <option value="<?php echo $rw->id; ?>"><?php echo esc_html($rw->name); ?></option>
+                            <?php endforeach; ?>
+                        </select>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Artículo personalizado</th>
+                    <td>
+                        <input type="text" name="ac_custom_name" id="ac_custom_name" class="regular-text" placeholder="ej. Concha de chocolate (si no está en el catálogo)">
+                        <p class="description">Si seleccionaste un artículo del catálogo, este campo se ignora.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Nota interna</th>
+                    <td><input type="text" name="ac_note" class="regular-text" placeholder="ej. Compensación por pedido #1234"></td>
+                </tr>
+                <tr>
+                    <th>Fecha de vencimiento</th>
+                    <td><input type="date" name="ac_expires" min="<?php echo date('Y-m-d'); ?>"><p class="description">Opcional. Dejar vacío = sin vencimiento.</p></td>
+                </tr>
+            </table>
+            <input type="submit" name="erbl_assign_coupon" class="button button-primary" value="Asignar cupón">
+        </form>
+        <script>
+        function erblRewardSelect(sel) {
+            document.getElementById('ac_custom_name').disabled = sel.value !== '';
+            document.getElementById('ac_custom_name').style.opacity = sel.value !== '' ? '.4' : '1';
+        }
+        </script>
 
     <?php elseif ($tab === 'members'): ?>
         <h2>Buscar miembro</h2>
@@ -2424,6 +3742,382 @@ function erbl_admin_page_full() {
             </tbody></table>
             <?php else: ?><p>Sin resultados.</p><?php endif;
         endif;?>
+
+    <?php elseif ($tab === 'carousel'):
+        $slides   = get_option('erbl_carousel_slides', []);
+        if (!is_array($slides)) $slides = [];
+        $page_url = admin_url('admin.php?page=elrancho-loyalty&tab=carousel');
+
+        // ── Determine if we're editing an existing slide ──────────────────────
+        $editing_id = sanitize_text_field($_GET['edit_slide'] ?? '');
+        $editing    = null;
+        foreach ($slides as $s) {
+            if ($s['id'] === $editing_id) { $editing = $s; break; }
+        }
+
+        // ── Handle form actions ───────────────────────────────────────────────
+        if (isset($_POST['erbl_carousel_action']) && check_admin_referer('erbl_carousel_nonce')) {
+            $act = sanitize_key($_POST['erbl_carousel_action']);
+            $sid = sanitize_text_field($_POST['slide_id'] ?? '');
+
+            if ($act === 'add') {
+                $slides[] = [
+                    'id'       => uniqid('sl_'),
+                    'image_id' => absint($_POST['image_id'] ?? 0),
+                    'image_url'=> esc_url_raw($_POST['image_url'] ?? ''),
+                    'title'    => sanitize_text_field($_POST['title'] ?? ''),
+                    'subtitle' => sanitize_text_field($_POST['subtitle'] ?? ''),
+                    'link'     => sanitize_text_field($_POST['link'] ?? ''),
+                    'active'   => !empty($_POST['active']),
+                ];
+
+            } elseif ($act === 'edit') {
+                foreach ($slides as &$s) {
+                    if ($s['id'] !== $sid) continue;
+                    if (absint($_POST['image_id'] ?? 0)) $s['image_id'] = absint($_POST['image_id']);
+                    if (!empty($_POST['image_url']))      $s['image_url'] = esc_url_raw($_POST['image_url']);
+                    $s['title']    = sanitize_text_field($_POST['title']    ?? '');
+                    $s['subtitle'] = sanitize_text_field($_POST['subtitle'] ?? '');
+                    $s['link']     = sanitize_text_field($_POST['link']     ?? '');
+                    $s['active']   = !empty($_POST['active']);
+                }
+                unset($s);
+
+            } elseif ($act === 'delete') {
+                $slides = array_values(array_filter($slides, fn($s) => $s['id'] !== $sid));
+
+            } elseif ($act === 'toggle') {
+                foreach ($slides as &$s) { if ($s['id'] === $sid) $s['active'] = !$s['active']; }
+                unset($s);
+
+            } elseif ($act === 'up' || $act === 'down') {
+                $ids = array_column($slides, 'id');
+                $idx = array_search($sid, $ids);
+                if ($idx !== false) {
+                    $ni = $act === 'up' ? max(0, $idx - 1) : min(count($slides) - 1, $idx + 1);
+                    [$slides[$idx], $slides[$ni]] = [$slides[$ni], $slides[$idx]];
+                }
+            }
+
+            update_option('erbl_carousel_slides', $slides);
+            // After save, redirect to clean URL (removes edit_slide param too)
+            wp_redirect($page_url);
+            exit;
+        }
+        ?>
+
+        <h2 style="margin-bottom:16px;">Carrusel de inicio — App</h2>
+
+        <?php /* ── Add / Edit form ── */ ?>
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px 24px;margin-bottom:24px;">
+            <?php if ($editing): ?>
+                <h3 style="margin-top:0;">Editando slide: <em><?php echo esc_html($editing['title'] ?: $editing['id']); ?></em>
+                    <a href="<?php echo esc_url($page_url); ?>" style="font-size:12px;font-weight:400;margin-left:10px;">← Cancelar</a>
+                </h3>
+            <?php else: ?>
+                <h3 style="margin-top:0;">Agregar slide</h3>
+            <?php endif; ?>
+
+            <form method="post" action="<?php echo esc_url($page_url); ?>">
+                <?php wp_nonce_field('erbl_carousel_nonce'); ?>
+                <input type="hidden" name="erbl_carousel_action" value="<?php echo $editing ? 'edit' : 'add'; ?>">
+                <?php if ($editing): ?>
+                    <input type="hidden" name="slide_id" value="<?php echo esc_attr($editing['id']); ?>">
+                <?php endif; ?>
+
+                <table class="form-table" style="max-width:700px;">
+                    <tr>
+                        <th style="width:130px;"><label>Imagen</label></th>
+                        <td>
+                            <input type="hidden" name="image_id"  id="erbl_image_id"
+                                value="<?php echo esc_attr($editing['image_id'] ?? ''); ?>">
+                            <input type="hidden" name="image_url" id="erbl_image_url"
+                                value="<?php echo esc_attr($editing['image_url'] ?? ''); ?>">
+                            <div id="erbl_preview" style="margin-bottom:8px;">
+                                <?php if (!empty($editing['image_url'])): ?>
+                                    <img src="<?php echo esc_url($editing['image_url']); ?>"
+                                        style="height:60px;border-radius:4px;object-fit:cover;">
+                                <?php endif; ?>
+                            </div>
+                            <button type="button" class="button erbl-media-btn"
+                                data-target-id="erbl_image_id"
+                                data-target-url="erbl_image_url"
+                                data-preview="erbl_preview">
+                                <?php echo $editing ? 'Cambiar imagen' : 'Seleccionar imagen'; ?>
+                            </button>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label>Título</label></th>
+                        <td><input type="text" name="title" class="regular-text"
+                            placeholder="Promo de verano"
+                            value="<?php echo esc_attr($editing['title'] ?? ''); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th><label>Subtítulo</label></th>
+                        <td><input type="text" name="subtitle" class="regular-text"
+                            placeholder="20% off en pasteles"
+                            value="<?php echo esc_attr($editing['subtitle'] ?? ''); ?>"></td>
+                    </tr>
+                    <tr>
+                        <th><label>Link (opcional)</label></th>
+                        <td>
+                            <input type="text" name="link" class="regular-text"
+                                placeholder="/(tabs)/catalog"
+                                value="<?php echo esc_attr($editing['link'] ?? ''); ?>">
+                            <p class="description">Ruta interna de la app, p.ej. <code>/(tabs)/catalog</code> o déjalo vacío.</p>
+                        </td>
+                    </tr>
+                    <tr>
+                        <th><label>Activo</label></th>
+                        <td><label>
+                            <input type="checkbox" name="active" value="1"
+                                <?php checked(!isset($editing) || !empty($editing['active'])); ?>>
+                            Mostrar en la app
+                        </label></td>
+                    </tr>
+                </table>
+                <p>
+                    <input type="submit" class="button button-primary"
+                        value="<?php echo $editing ? 'Guardar cambios' : 'Agregar slide'; ?>">
+                </p>
+            </form>
+        </div>
+
+        <?php /* ── Existing slides ── */ ?>
+        <?php if (empty($slides)): ?>
+            <p style="color:#666;">No hay slides aún. Agrega el primero arriba.</p>
+        <?php else: ?>
+        <table class="widefat striped" style="border-radius:8px;overflow:hidden;">
+            <thead>
+                <tr>
+                    <th style="width:100px;">Imagen</th>
+                    <th>Título / Subtítulo</th>
+                    <th style="width:120px;">Link</th>
+                    <th style="width:80px;text-align:center;">Activo</th>
+                    <th style="width:220px;">Acciones</th>
+                </tr>
+            </thead>
+            <tbody>
+            <?php foreach ($slides as $i => $s): ?>
+                <tr<?php if ($s['id'] === $editing_id) echo ' style="background:#fef9e7;"'; ?>>
+                    <td>
+                        <?php if (!empty($s['image_url'])): ?>
+                            <img src="<?php echo esc_url($s['image_url']); ?>"
+                                style="width:80px;height:50px;object-fit:cover;border-radius:4px;">
+                        <?php else: ?>
+                            <span style="color:#999;font-size:12px;">Sin imagen</span>
+                        <?php endif; ?>
+                    </td>
+                    <td>
+                        <strong><?php echo esc_html($s['title'] ?: '—'); ?></strong><br>
+                        <span style="color:#666;font-size:12px;"><?php echo esc_html($s['subtitle'] ?: '—'); ?></span>
+                    </td>
+                    <td style="font-size:12px;color:#666;"><?php echo esc_html($s['link'] ?: '—'); ?></td>
+                    <td style="text-align:center;">
+                        <form method="post" action="<?php echo esc_url($page_url); ?>" style="display:inline;">
+                            <?php wp_nonce_field('erbl_carousel_nonce'); ?>
+                            <input type="hidden" name="erbl_carousel_action" value="toggle">
+                            <input type="hidden" name="slide_id" value="<?php echo esc_attr($s['id']); ?>">
+                            <button type="submit" class="button button-small">
+                                <?php echo !empty($s['active']) ? '✅' : '⭕'; ?>
+                            </button>
+                        </form>
+                    </td>
+                    <td style="display:flex;gap:4px;flex-wrap:wrap;align-items:center;padding:8px;">
+                        <?php if ($i > 0): ?>
+                        <form method="post" action="<?php echo esc_url($page_url); ?>" style="display:inline;">
+                            <?php wp_nonce_field('erbl_carousel_nonce'); ?>
+                            <input type="hidden" name="erbl_carousel_action" value="up">
+                            <input type="hidden" name="slide_id" value="<?php echo esc_attr($s['id']); ?>">
+                            <button type="submit" class="button button-small" title="Subir">↑</button>
+                        </form>
+                        <?php endif; ?>
+                        <?php if ($i < count($slides) - 1): ?>
+                        <form method="post" action="<?php echo esc_url($page_url); ?>" style="display:inline;">
+                            <?php wp_nonce_field('erbl_carousel_nonce'); ?>
+                            <input type="hidden" name="erbl_carousel_action" value="down">
+                            <input type="hidden" name="slide_id" value="<?php echo esc_attr($s['id']); ?>">
+                            <button type="submit" class="button button-small" title="Bajar">↓</button>
+                        </form>
+                        <?php endif; ?>
+
+                        <a href="<?php echo esc_url(add_query_arg('edit_slide', $s['id'], $page_url)); ?>"
+                            class="button button-small">Editar</a>
+
+                        <form method="post" action="<?php echo esc_url($page_url); ?>" style="display:inline;"
+                            onsubmit="return confirm('¿Eliminar este slide?');">
+                            <?php wp_nonce_field('erbl_carousel_nonce'); ?>
+                            <input type="hidden" name="erbl_carousel_action" value="delete">
+                            <input type="hidden" name="slide_id" value="<?php echo esc_attr($s['id']); ?>">
+                            <button type="submit" class="button button-small" style="color:#cc0000;">Eliminar</button>
+                        </form>
+                    </td>
+                </tr>
+            <?php endforeach; ?>
+            </tbody>
+        </table>
+        <?php endif; ?>
+
+        <script>
+        (function($){
+            $(document).on('click', '.erbl-media-btn', function(e){
+                e.preventDefault();
+                var btn = $(this);
+                var frame = wp.media({ title: 'Seleccionar imagen', button: { text: 'Usar imagen' }, multiple: false });
+                frame.on('select', function(){
+                    var att = frame.state().get('selection').first().toJSON();
+                    $('#' + btn.data('target-id')).val(att.id);
+                    var url = (att.sizes && att.sizes.large) ? att.sizes.large.url : att.url;
+                    $('#' + btn.data('target-url')).val(url);
+                    $('#' + btn.data('preview')).html('<img src="'+url+'" style="height:60px;border-radius:4px;object-fit:cover;">');
+                });
+                frame.open();
+            });
+        })(jQuery);
+        </script>
+
+    <?php elseif ($tab === 'notifications'):
+        global $wpdb;
+        $t_pt   = $wpdb->prefix . 'erbl_push_tokens';
+        $t_pl   = $wpdb->prefix . 'erbl_push_log';
+        $total_devices  = (int)$wpdb->get_var("SELECT COUNT(*) FROM $t_pt");
+        $total_users    = (int)$wpdb->get_var("SELECT COUNT(DISTINCT user_id) FROM $t_pt");
+        $sent_today     = (int)$wpdb->get_var($wpdb->prepare("SELECT COALESCE(SUM(sent_count),0) FROM $t_pl WHERE sent_at >= %s", date('Y-m-d')));
+        $recent_log     = $wpdb->get_results("SELECT l.*, u.display_name FROM $t_pl l LEFT JOIN {$wpdb->users} u ON u.ID = JSON_UNQUOTE(JSON_EXTRACT(l.user_ids,'$[0]')) ORDER BY l.id DESC LIMIT 20");
+        ?>
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px;">
+            <?php foreach ([['Dispositivos registrados',$total_devices,''],['Usuarios con push',$total_users,''],['Enviados hoy',$sent_today,'']] as $c): ?>
+                <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:16px 20px;">
+                    <div style="font-size:12px;color:#666;margin-bottom:4px;"><?php echo esc_html($c[0]); ?></div>
+                    <div style="font-size:22px;font-weight:600;"><?php echo esc_html($c[1]); ?></div>
+                </div>
+            <?php endforeach; ?>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px;">
+            <!-- Envío broadcast -->
+            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
+                <h3 style="margin-top:0;">Enviar a todos</h3>
+                <p style="color:#646970;font-size:13px;">Se enviará a todos los usuarios con la app instalada y permisos habilitados.</p>
+                <table class="form-table" style="margin:0;">
+                    <tr><th style="width:100px;"><label for="push_bc_title">Título</label></th>
+                        <td><input type="text" id="push_bc_title" class="regular-text" placeholder="¡Novedad en El Rancho!"></td></tr>
+                    <tr><th><label for="push_bc_body">Mensaje</label></th>
+                        <td><textarea id="push_bc_body" rows="3" class="large-text" placeholder="Este fin de semana 2x puntos en todos tus pedidos."></textarea></td></tr>
+                </table>
+                <button id="erbl-push-broadcast-btn" class="button button-primary" style="margin-top:12px;">
+                    Enviar broadcast
+                </button>
+                <span id="erbl-push-broadcast-status" style="margin-left:10px;font-size:13px;"></span>
+            </div>
+
+            <!-- Envío a usuario específico -->
+            <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
+                <h3 style="margin-top:0;">Enviar a usuario</h3>
+                <p style="color:#646970;font-size:13px;">Notificación personalizada a un cliente en particular.</p>
+                <table class="form-table" style="margin:0;">
+                    <tr><th style="width:100px;"><label for="push_u_uid">Usuario ID</label></th>
+                        <td><input type="number" id="push_u_uid" class="small-text" min="1" placeholder="42"></td></tr>
+                    <tr><th><label for="push_u_title">Título</label></th>
+                        <td><input type="text" id="push_u_title" class="regular-text" placeholder="Tienes puntos por expirar"></td></tr>
+                    <tr><th><label for="push_u_body">Mensaje</label></th>
+                        <td><textarea id="push_u_body" rows="3" class="large-text" placeholder="Canjéalos antes del 31 de marzo."></textarea></td></tr>
+                </table>
+                <button id="erbl-push-user-btn" class="button button-primary" style="margin-top:12px;">
+                    Enviar notificación
+                </button>
+                <span id="erbl-push-user-status" style="margin-left:10px;font-size:13px;"></span>
+            </div>
+        </div>
+
+        <!-- Log de notificaciones recientes -->
+        <div style="background:#fff;border:1px solid #ddd;border-radius:8px;padding:20px;">
+            <h3 style="margin-top:0;">Historial de notificaciones enviadas</h3>
+            <?php if ($recent_log): ?>
+            <table class="widefat" style="border:none;">
+                <thead><tr>
+                    <th>Título</th><th>Mensaje</th><th>Destinatarios</th>
+                    <th style="color:#0a7c42;">Enviados</th><th style="color:#c0392b;">Fallidos</th><th>Fecha</th>
+                </tr></thead>
+                <tbody>
+                <?php foreach ($recent_log as $row):
+                    $uids     = json_decode($row->user_ids, true);
+                    $is_broad = count($uids) > 1 || empty($uids);
+                    $dest     = $is_broad ? '<em style="color:#646970;">Broadcast</em>' : esc_html($row->display_name ?: '#'.$uids[0]);
+                ?>
+                    <tr>
+                        <td style="font-weight:600;"><?php echo esc_html($row->title); ?></td>
+                        <td style="color:#646970;font-size:12px;"><?php echo esc_html(wp_trim_words($row->body, 10)); ?></td>
+                        <td><?php echo $dest; ?></td>
+                        <td style="font-weight:600;color:#0a7c42;"><?php echo intval($row->sent_count); ?></td>
+                        <td style="font-weight:600;color:#c0392b;"><?php echo intval($row->failed_count); ?></td>
+                        <td style="font-size:11px;color:#646970;"><?php echo esc_html(date_i18n('d M Y H:i', strtotime($row->sent_at))); ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                </tbody>
+            </table>
+            <?php else: ?>
+                <p style="color:#646970;">No se han enviado notificaciones todavía.</p>
+            <?php endif; ?>
+        </div>
+
+        <script>
+        (function() {
+            var nonce = '<?php echo wp_create_nonce("erbl_push_send"); ?>';
+
+            function sendPush(btn, statusEl, title, body, userId) {
+                if (!title || !body) { statusEl.textContent = 'Completa título y mensaje.'; return; }
+                btn.disabled = true;
+                statusEl.textContent = 'Enviando…';
+                fetch(ajaxurl, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: new URLSearchParams({
+                        action:  'erbl_send_push',
+                        _wpnonce: nonce,
+                        title:   title,
+                        body:    body,
+                        user_id: userId || 0,
+                    }),
+                })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        var d = data.data;
+                        statusEl.textContent = '✓ Enviados: ' + d.sent + '  ✗ Fallidos: ' + d.failed;
+                        statusEl.style.color = d.failed > 0 ? '#c0392b' : '#0a7c42';
+                    } else {
+                        statusEl.textContent = '✗ ' + (data.data || 'Error');
+                        statusEl.style.color = '#c0392b';
+                    }
+                    btn.disabled = false;
+                })
+                .catch(() => { statusEl.textContent = '✗ Error de red'; btn.disabled = false; });
+            }
+
+            document.getElementById('erbl-push-broadcast-btn').addEventListener('click', function() {
+                sendPush(
+                    this,
+                    document.getElementById('erbl-push-broadcast-status'),
+                    document.getElementById('push_bc_title').value.trim(),
+                    document.getElementById('push_bc_body').value.trim(),
+                    0
+                );
+            });
+
+            document.getElementById('erbl-push-user-btn').addEventListener('click', function() {
+                sendPush(
+                    this,
+                    document.getElementById('erbl-push-user-status'),
+                    document.getElementById('push_u_title').value.trim(),
+                    document.getElementById('push_u_body').value.trim(),
+                    document.getElementById('push_u_uid').value.trim()
+                );
+            });
+        })();
+        </script>
+
     <?php endif;?>
     </div>
     <?php
@@ -2484,6 +4178,25 @@ add_action( 'wp_ajax_erbl_run_migration', function() {
         'Migración completada: %d puntos migrados, %d códigos generados, %d gastos calculados.',
         $migrated, $ref_gen, $spend_calc
     ));
+} );
+
+/* --------------------------------------------------
+   PUSH NOTIFICATIONS — AJAX admin
+   -------------------------------------------------- */
+add_action( 'wp_ajax_erbl_send_push', function() {
+    if ( ! current_user_can('manage_woocommerce') ) { wp_send_json_error('Sin permisos.'); }
+    check_ajax_referer('erbl_push_send');
+    $title   = sanitize_text_field( $_POST['title']   ?? '' );
+    $body    = sanitize_textarea_field( $_POST['body'] ?? '' );
+    $user_id = absint( $_POST['user_id'] ?? 0 );
+
+    if ( ! $title || ! $body ) { wp_send_json_error('Título y mensaje son requeridos.'); }
+
+    $result = $user_id > 0
+        ? erbl_send_push( [$user_id], $title, $body )
+        : erbl_send_push_broadcast( $title, $body );
+
+    wp_send_json_success( $result );
 } );
 
 /* --------------------------------------------------

@@ -53,7 +53,16 @@
 - [x] **Staff Redención** Rol `erbl_staff` con capacidad `erbl_staff_consume` creado en `erbl_install()`
 - [x] **Staff Redención** `$staff_auth` — autorización unificada: `manage_woocommerce` OR `erbl_staff` role OR `staff_pin` param
 - [x] **Staff Redención** Settings: `staff_pin` y `redeem_min_store` en panel admin → Staff & Tienda
+- [x] **Fix** `elrancho_loyalty_sanitize_settings()` no incluía `staff_pin` ni `redeem_min_store` — se descartaban al guardar
+- [x] **Fix** `page-rancho-staff.php`: cámara negra en iOS Safari — `BarcodeDetector` no disponible, ocultar video con `querySelector('.scanner-video-wrap')`
+- [x] **Fix** PHP 8: `validate_callback => 'is_numeric'` en `/redeem-token` causaba `ArgumentCountError` — envuelto en lambda
+- [x] **Admin** Botón "🧪 Generar token de prueba" en Dashboard admin (selecciona usuario + puntos, crea transient)
+- [x] **Cliente** Tarjeta "🏪 Redimir en tienda física" en Mis Puntos — slider de puntos + botón Generar QR (QRCode.js CDN)
+- [x] **Cliente** Slider de redención respeta el mínimo configurado (`redeem_minimum`) como valor inicial y mínimo del range
+- [x] **Cliente** Historial de puntos rediseñado como tarjetas para móvil (antes era tabla de 5 columnas)
+- [x] **Staff** REST `GET /wp-json/erbl/v1/staff/redemptions` — últimas redenciones (requiere `$staff_auth`)
+- [x] **Staff** Sección "Redenciones recientes" en `page-rancho-staff.php` — se carga al entrar y se actualiza tras cada canje
 
 ---
 
-*Actualizado el 16 Mar 2026 — todas las tareas completadas*
+*Actualizado el 17 Mar 2026*

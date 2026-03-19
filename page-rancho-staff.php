@@ -171,6 +171,17 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
             </div>
             <div class="scanner-status" id="scanner-status"></div>
         </div>
+
+        <!-- Historial de redenciones -->
+        <div style="background:#fff;border-radius:16px;padding:16px;box-shadow:0 2px 12px rgba(74,59,50,.07);">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+                <span style="font-size:14px;font-weight:700;color:#4A3B32;">Redenciones recientes</span>
+                <button onclick="loadRedemptions()" style="background:none;border:none;font-size:12px;color:#b81417;cursor:pointer;padding:4px 8px;">↺ Actualizar</button>
+            </div>
+            <div id="staff-history-list">
+                <p style="font-size:13px;color:#aaa;text-align:center;padding:12px 0;">Cargando...</p>
+            </div>
+        </div>
     </div>
 
     <!-- ── PANTALLA: CONFIRMACIÓN ── -->
@@ -184,7 +195,7 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
             <div class="confirm-amount">
                 <div class="confirm-pts" id="confirm-pts">— puntos</div>
                 <div class="confirm-discount" id="confirm-discount">$0.00</div>
-                <div class="confirm-discount-label">USD a descontar</div>
+                <div class="confirm-discount-label" id="confirm-discount-label">USD a descontar</div>
                 <div class="confirm-balance" id="confirm-balance"></div>
             </div>
             <div class="confirm-actions">
@@ -204,9 +215,9 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
             <div class="result-title" id="result-title">¡Listo!</div>
             <div class="result-msg" id="result-msg"></div>
             <div class="result-discount-box" id="result-discount-box">
-                <div class="result-discount-label">APLICA ESTE DESCUENTO EN EL POS</div>
+                <div class="result-discount-label" id="result-discount-label">APLICA ESTE DESCUENTO EN EL POS</div>
                 <div class="result-discount-val" id="result-discount-val">$0.00</div>
-                <div class="result-discount-hint">Ingresa manualmente en tu sistema de cobro</div>
+                <div class="result-discount-hint" id="result-discount-hint">Ingresa manualmente en tu sistema de cobro</div>
             </div>
             <button class="btn-new" onclick="newScan()">Siguiente cliente</button>
         </div>
@@ -276,9 +287,43 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
     }
 
     // ── SCANNER ──────────────────────────────────────
+    function loadRedemptions() {
+        var list = document.getElementById('staff-history-list');
+        var storedPin = sessionStorage.getItem('erbl_staff_pin') || '';
+        fetch(API + '/staff/redemptions?limit=10&staff_pin=' + encodeURIComponent(storedPin))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (!Array.isArray(data) || data.length === 0) {
+                    list.innerHTML = '<p style="font-size:13px;color:#aaa;text-align:center;padding:12px 0;">Sin redenciones recientes.</p>';
+                    return;
+                }
+                var html = '';
+                data.forEach(function(r) {
+                    var d = new Date(r.created_at.replace(' ', 'T'));
+                    var time = d.toLocaleTimeString('es-MX', {hour:'2-digit', minute:'2-digit'});
+                    var date = d.toLocaleDateString('es-MX', {day:'numeric', month:'short'});
+                    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #f0e8de;">'
+                        + '<div>'
+                        + '<div style="font-size:13px;font-weight:600;color:#4A3B32;">' + r.user + '</div>'
+                        + '<div style="font-size:11px;color:#aaa;margin-top:2px;">' + date + ' · ' + time + '</div>'
+                        + '</div>'
+                        + '<div style="text-align:right;">'
+                        + '<div style="font-size:15px;font-weight:700;color:#b81417;">' + r.label + '</div>'
+                        + '<div style="font-size:11px;color:#7D6B60;">' + r.points + ' pts</div>'
+                        + '</div>'
+                        + '</div>';
+                });
+                list.innerHTML = html;
+            })
+            .catch(function() {
+                list.innerHTML = '<p style="font-size:13px;color:#aaa;text-align:center;padding:12px 0;">Error al cargar.</p>';
+            });
+    }
+
     function startScanner() {
         showScreen('screen-scanner');
         document.getElementById('btn-logout').style.display = '';
+        loadRedemptions();
 
         if (typeof BarcodeDetector !== 'undefined') {
             detector = new BarcodeDetector({formats: ['qr_code']});
@@ -292,10 +337,12 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
                     scanLoop = requestAnimationFrame(scanFrame);
                 })
                 .catch(function() {
+                    document.querySelector('.scanner-video-wrap').style.display = 'none';
                     document.getElementById('scanner-status').textContent = 'Cámara no disponible. Usa el código manual.';
                 });
         } else {
-            document.getElementById('scanner-status').textContent = 'Usa el código manual (cámara no compatible con este browser).';
+            document.querySelector('.scanner-video-wrap').style.display = 'none';
+            document.getElementById('scanner-status').textContent = 'Escaneo QR no compatible con este navegador. Ingresa el código manualmente.';
         }
     }
 
@@ -373,13 +420,26 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
     // ── CONFIRM ──────────────────────────────────────
     function showConfirm(data) {
         stopCamera();
-        var name = data.user || '—';
-        document.getElementById('confirm-avatar').textContent = name.charAt(0).toUpperCase();
-        document.getElementById('confirm-name').textContent = name;
-        document.getElementById('confirm-tier').textContent = data.tier_label || '';
-        document.getElementById('confirm-pts').textContent = data.points.toLocaleString() + ' puntos';
-        document.getElementById('confirm-discount').textContent = '$' + data.value_usd.toFixed(2);
-        document.getElementById('confirm-balance').textContent = 'Saldo restante: ' + data.balance_after.toLocaleString() + ' pts';
+        document.getElementById('confirm-name').textContent   = data.user;
+        document.getElementById('confirm-avatar').textContent = data.user ? data.user.charAt(0).toUpperCase() : '?';
+        document.getElementById('confirm-tier').textContent   = data.tier_label || '';
+        document.getElementById('confirm-pts').textContent    = data.points + ' puntos';
+        document.getElementById('confirm-balance').textContent = 'Balance después: ' + data.balance_after;
+
+        if (data.token_type === 'reward') {
+            document.getElementById('confirm-discount').textContent       = data.reward_name;
+            document.getElementById('confirm-discount-label').textContent = 'Artículo a entregar';
+        } else if (data.token_type === 'assigned_reward') {
+            document.getElementById('confirm-pts').textContent    = '🎟️ Cupón regalo';
+            document.getElementById('confirm-discount').textContent = data.reward_name;
+            var arcLabel = 'Artículo de regalo (sin costo de puntos)';
+            if (data.note) arcLabel += ' — ' + data.note;
+            document.getElementById('confirm-discount-label').textContent = arcLabel;
+            document.getElementById('confirm-balance').textContent = '';
+        } else {
+            document.getElementById('confirm-discount').textContent       = '$' + data.value_usd.toFixed(2);
+            document.getElementById('confirm-discount-label').textContent = 'USD a descontar';
+        }
         showScreen('screen-confirm');
     }
 
@@ -419,8 +479,20 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
             document.getElementById('result-icon').textContent = '✅';
             document.getElementById('result-title').className = 'result-title success';
             document.getElementById('result-title').textContent = '¡Redención exitosa!';
-            document.getElementById('result-msg').textContent = data.user + ' ha usado sus puntos.';
-            document.getElementById('result-discount-val').textContent = '$' + data.value_usd.toFixed(2) + ' USD';
+            document.getElementById('result-msg').textContent = '¡Redención procesada para ' + data.user + '!';
+            if (data.token_type === 'reward') {
+                document.getElementById('result-discount-label').textContent = 'ENTREGA AL CLIENTE:';
+                document.getElementById('result-discount-val').textContent   = data.reward_name;
+                document.getElementById('result-discount-hint').textContent  = 'Entrega el artículo y confirma en el POS';
+            } else if (data.token_type === 'assigned_reward') {
+                document.getElementById('result-discount-label').textContent = '🎟️ CUPÓN CANJEADO:';
+                document.getElementById('result-discount-val').textContent   = data.reward_name;
+                document.getElementById('result-discount-hint').textContent  = 'Entregar el artículo al cliente. No se descuentan puntos.';
+            } else {
+                document.getElementById('result-discount-label').textContent = 'APLICA ESTE DESCUENTO EN EL POS';
+                document.getElementById('result-discount-val').textContent   = '$' + data.value_usd.toFixed(2);
+                document.getElementById('result-discount-hint').textContent  = 'Ingresa manualmente en tu sistema de cobro';
+            }
             box.style.display = '';
         } else {
             document.getElementById('result-icon').textContent = '❌';

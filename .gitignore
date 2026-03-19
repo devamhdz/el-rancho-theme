@@ -1,0 +1,12 @@
+# WordPress theme
+*.log
+.DS_Store
+._*
+
+# Expo / React Native
+app/node_modules/
+app/.expo/
+app/dist/
+app/.env
+app/android/
+app/ios/

@@ -19,6 +19,7 @@ tar czf - \
   --exclude='./deploy.sh' \
   --exclude='./*.md' \
   --exclude='./node_modules' \
+  --exclude='./app' \
   --exclude='./.DS_Store' \
   --exclude='./._*' \
   -C "$LOCAL_PATH" . \
