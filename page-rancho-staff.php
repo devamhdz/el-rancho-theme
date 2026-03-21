@@ -61,14 +61,14 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
 .scanner-corner.tr{top:0;right:0;border-top-width:3px;border-right-width:3px;border-radius:0 4px 0 0}
 .scanner-corner.bl{bottom:0;left:0;border-bottom-width:3px;border-left-width:3px;border-radius:0 0 0 4px}
 .scanner-corner.br{bottom:0;right:0;border-bottom-width:3px;border-right-width:3px;border-radius:0 0 4px 0}
-.scanner-hint{background:#fff;padding:1rem 1.25rem;text-align:center}
-.scanner-hint p{font-size:.8125rem;color:#7D6B60;margin-bottom:.75rem}
+.scanner-hint{background:#fff;padding:.75rem 1.25rem;text-align:center}
+.scanner-hint p{font-size:.8125rem;color:#7D6B60;margin:0}
 .manual-input-wrap{display:flex;gap:8px}
 .manual-input-wrap input{flex:1;border:1.5px solid #e0d8cf;border-radius:10px;padding:.625rem .875rem;font-size:.9375rem;color:#4A3B32;outline:none;font-family:monospace;text-transform:uppercase;letter-spacing:.05em}
 .manual-input-wrap input:focus{border-color:#b81417}
 .btn-scan{background:#b81417;color:#fff;border:none;border-radius:10px;padding:.625rem 1rem;font-size:.875rem;font-weight:600;cursor:pointer;white-space:nowrap}
 .btn-scan:active{background:#8a0f11}
-.scanner-status{font-size:.8125rem;color:#b81417;text-align:center;padding:.5rem 1.25rem;min-height:2rem}
+.scanner-status{font-size:.8125rem;color:#b81417;text-align:center;padding:.5rem 0 0;min-height:1.25rem}
 
 /* Confirm screen */
 .confirm-card{background:#fff;border-radius:20px;padding:1.75rem 1.5rem;box-shadow:0 2px 16px rgba(74,59,50,.08)}
@@ -162,12 +162,17 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
                     </div>
                 </div>
             </div>
-            <div class="scanner-hint">
-                <p>Apunta la cámara al QR del cliente, o ingresa el código manualmente</p>
-                <div class="manual-input-wrap">
-                    <input type="text" id="manual-code" placeholder="Código del cliente" maxlength="32" autocomplete="off" autocapitalize="characters">
-                    <button class="btn-scan" onclick="submitCode()">Buscar</button>
-                </div>
+                <div class="scanner-hint">
+                <p>Apunta la cámara al código QR del cliente</p>
+            </div>
+        </div>
+
+        <!-- Input manual (fuera de la card de cámara) -->
+        <div style="background:#fff;border-radius:16px;padding:16px 20px;box-shadow:0 2px 12px rgba(74,59,50,.07);">
+            <p style="font-size:12px;font-weight:600;color:#7D6B60;text-transform:uppercase;letter-spacing:.04em;margin-bottom:10px;">O ingresa el código manualmente</p>
+            <div class="manual-input-wrap">
+                <input type="text" id="manual-code" placeholder="Código del cliente" maxlength="32" autocomplete="off" autocapitalize="characters">
+                <button class="btn-scan" onclick="submitCode()">Buscar</button>
             </div>
             <div class="scanner-status" id="scanner-status"></div>
         </div>
