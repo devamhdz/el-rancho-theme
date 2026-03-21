@@ -51,7 +51,7 @@ body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:#f5f0eb;min
 .pin-error{color:#b81417;font-size:.875rem;margin-top:1rem;min-height:1.25rem}
 
 /* Scanner screen */
-.scanner-card{background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 2px 16px rgba(74,59,50,.08);flex:1;display:flex;flex-direction:column}
+.scanner-card{background:#fff;border-radius:20px;overflow:hidden;box-shadow:0 2px 16px rgba(74,59,50,.08);display:flex;flex-direction:column}
 .scanner-video-wrap{position:relative;background:#000;aspect-ratio:1;width:100%}
 #staff-video{width:100%;height:100%;object-fit:cover}
 .scanner-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none}
